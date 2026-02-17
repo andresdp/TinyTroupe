@@ -10,6 +10,7 @@ from tinytroupe.utils.concurrency import monitor_threads
 ##########################
 refresh_cache = False
 use_cache = False
+headless = True
 # test_examples = False # will use Pytest markers instead
 
 _MONITOR_INTERVAL_SECONDS = 30
@@ -61,6 +62,11 @@ def pytest_addoption(parser):
         action="store_true",
         help="Uses the API cache for the tests, to reduce the number of actual API calls.",
     )
+    parser.addoption(
+        "--no_headless",
+        action="store_true",
+        help="Runs browser tests in headed mode so you can watch the browser window.",
+    )
     # parser.addoption("--test_examples", action="store_true", help="Also reruns all examples to make sure they still work. This can substantially increase the test time.")
 
 
@@ -94,9 +100,10 @@ def pytest_configure(config):
 
 
 def pytest_generate_tests(metafunc):
-    global refresh_cache, use_cache, test_examples
+    global refresh_cache, use_cache, headless, test_examples
     refresh_cache = metafunc.config.getoption("refresh_cache")
     use_cache = metafunc.config.getoption("use_cache")
+    headless = not metafunc.config.getoption("no_headless")
     # test_examples = metafunc.config.getoption("test_examples")
 
     # Get the name of the test case being analyzed

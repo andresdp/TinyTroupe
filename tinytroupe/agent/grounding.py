@@ -151,6 +151,12 @@ class BaseSemanticGroundingConnector(GroundingConnector):
             logger.warning(f"Failed to deserialize index: {e}. Index will be rebuilt.")
             return None
     
+    #: Maximum character length for the embedding query sent to the retrieval
+    #: model.  The OpenAI text-embedding-3-small model has a hard 8 192-token
+    #: limit.  Using ~20 000 chars (~5 000 tokens) leaves ample headroom for
+    #: multi-byte characters and tokenizer variance.
+    EMBEDDING_QUERY_MAX_CHARS: int = 20_000
+
     def retrieve_relevant(self, relevance_target:str, top_k=20) -> list:
         """
         Retrieves all values from memory that are relevant to a given target.
@@ -158,7 +164,17 @@ class BaseSemanticGroundingConnector(GroundingConnector):
         # Handle empty or None query
         if not relevance_target or not relevance_target.strip():
             return []
-            
+
+        # Truncate the query to stay within the embedding model's token limit.
+        # The cognitive state can grow large during extended browsing sessions;
+        # a truncated query still captures the most salient context.
+        if len(relevance_target) > self.EMBEDDING_QUERY_MAX_CHARS:
+            logger.warning(
+                f"Embedding query too long ({len(relevance_target)} chars); "
+                f"truncating to {self.EMBEDDING_QUERY_MAX_CHARS} chars."
+            )
+            relevance_target = relevance_target[: self.EMBEDDING_QUERY_MAX_CHARS]
+
         if self.index is not None:
             retriever = self.index.as_retriever(similarity_top_k=top_k)
             nodes = retriever.retrieve(relevance_target)

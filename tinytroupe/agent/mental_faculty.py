@@ -21,15 +21,21 @@ class TinyMentalFaculty(JsonSerializableRegistry):
     Represents a mental faculty of an agent. Mental faculties are the cognitive abilities that an agent has.
     """
 
-    def __init__(self, name: str, requires_faculties: list = None) -> None:
+    def __init__(self, name: str, requires_faculties: list = None,
+                 real_world_side_effect_delay: float = 0.0) -> None:
         """
         Initializes the mental faculty.
 
         Args:
             name (str): The name of the mental faculty.
             requires_faculties (list): A list of mental faculties that this faculty requires to function properly.
+            real_world_side_effect_delay (float): Seconds to wait after each action
+                processed by this faculty, giving real-world side effects time to
+                settle (e.g., a page load after a browser navigation, an API call
+                completing, a device responding).  Defaults to 0 (no delay).
         """
         self.name = name
+        self.real_world_side_effect_delay = real_world_side_effect_delay
 
         if requires_faculties is None:
             self.requires_faculties = []
@@ -55,6 +61,30 @@ class TinyMentalFaculty(JsonSerializableRegistry):
             bool: True if the action was successfully processed, False otherwise.
         """
         raise NotImplementedError("Subclasses must implement this method.")
+
+    def process_observations(self, agent) -> None:
+        """Deliver any pending observations to the agent before the next act() call.
+
+        This lifecycle hook is called automatically at the start of each
+        ``act()`` turn, before the prompt is rebuilt and the LLM is invoked.
+        It gives faculties that receive asynchronous or externally-triggered
+        input (e.g., a browser whose state was changed by user navigation,
+        a sensor that collected new data, an inbox that received new messages)
+        the opportunity to inject stimuli into the agent's memory so that
+        the upcoming LLM call can see the latest state of the world.
+
+        The default implementation is a no-op.  Faculties that produce
+        observations should override this method.
+
+        .. note::
+           Observations delivered here reach the agent via the standard
+           ``agent.see()`` / ``agent._observe()`` path, so they land in
+           episodic memory and are included in the next prompt.
+
+        Args:
+            agent: The :class:`TinyPerson` that owns this faculty.
+        """
+        pass  # default no-op
 
     def actions_definitions_prompt(self) -> str:
         """

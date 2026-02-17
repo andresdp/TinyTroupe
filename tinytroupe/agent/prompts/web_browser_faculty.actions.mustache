@@ -1,0 +1,72 @@
+## Web Browser Actions
+
+You have access to a **real web browser** and can interact with live web pages. You have two levels of browser interaction:
+
+### High-level browsing (BROWSE)
+
+Use `BROWSE` when you want to accomplish a multi-step web task described in natural language.
+The system will automatically decompose your instruction into individual browser operations.
+
+- **type**: `BROWSE`
+- **content**: A natural-language description of what you want to accomplish on the web page.
+- **target**: (optional) A URL to navigate to before executing the instruction. If omitted, the action operates on the current page.
+
+**Examples:**
+```
+{"type": "BROWSE", "content": "Navigate to https://example.com and find the contact information", "target": "https://example.com"}
+{"type": "BROWSE", "content": "Fill in the search box with 'TinyTroupe' and press Enter", "target": ""}
+{"type": "BROWSE", "content": "Find the login form, enter the username 'alice' and password 'secret', then click Sign In", "target": ""}
+```
+
+### Low-level browser actions (BROWSE_ACTION)
+
+Use `BROWSE_ACTION` when you need precise, atomic control over the browser. The content field contains the action name followed by its parameters.
+
+- **type**: `BROWSE_ACTION`
+- **content**: `<action_name> <parameters>`
+- **target**: (not used)
+
+**Available actions:**
+
+| Action | Format | Description |
+|--------|--------|-------------|
+| `goto` | `goto <url>` | Navigate to a URL |
+| `click` | `click <selector>` | Click an element |
+| `fill` | `fill <selector> <text>` | Fill an input field |
+| `select` | `select <selector> <value>` | Select a dropdown option |
+| `press` | `press <key>` | Press a keyboard key (Enter, Tab, Escape, etc.) |
+| `scroll` | `scroll <up\|down> [amount]` | Scroll the page (default: 300px) |
+| `hover` | `hover <selector>` | Hover over an element |
+| `screenshot` | `screenshot` | Capture the current page state |
+| `get_content` | `get_content` | Retrieve the current page content |
+| `new_tab` | `new_tab [url]` | Open a new browser tab |
+| `switch_tab` | `switch_tab <index>` | Switch to a specific tab |
+| `close_tab` | `close_tab [index]` | Close a tab |
+| `back` | `back` | Navigate back |
+| `forward` | `forward` | Navigate forward |
+| `reload` | `reload` | Reload the current page |
+| `wait_for_stable` | `wait_for_stable` | Wait until the page content stops changing — useful when a web page is streaming a response (e.g., an AI chat reply, a search loading results, a form submission processing) and you need the final, complete output before reading it |
+
+**Examples:**
+```
+{"type": "BROWSE_ACTION", "content": "goto https://example.com", "target": ""}
+{"type": "BROWSE_ACTION", "content": "click button:has-text('Submit')", "target": ""}
+{"type": "BROWSE_ACTION", "content": "fill input[name=email] alice@example.com", "target": ""}
+{"type": "BROWSE_ACTION", "content": "press Enter", "target": ""}
+{"type": "BROWSE_ACTION", "content": "scroll down 500", "target": ""}
+{"type": "BROWSE_ACTION", "content": "screenshot", "target": ""}
+{"type": "BROWSE_ACTION", "content": "wait_for_stable", "target": ""}
+```
+
+### Requesting user help (BROWSE_REQUEST_USER_HELP)
+
+Use `BROWSE_REQUEST_USER_HELP` when you are stuck, encounter a challenge you cannot overcome (e.g., CAPTCHA, complex login, confusing UI), or want to ask the human operator for assistance.
+
+- **type**: `BROWSE_REQUEST_USER_HELP`
+- **content**: A description of what you need help with.
+- **target**: (not used)
+
+**Example:**
+```
+{"type": "BROWSE_REQUEST_USER_HELP", "content": "I am stuck at a CAPTCHA challenge and cannot proceed. Please solve it manually.", "target": ""}
+```

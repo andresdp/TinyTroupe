@@ -50,6 +50,20 @@ When asked to create a new operation, prioritize the LLM-version, unless it is c
 
 Whenever you add new functionalities or significantly changes existing ones, which risks breaking elements beyond the immediate mechanism being changed, you should run the core tests for a relatively quick verification of key functionality: `pytest -s --use_cache -m "core and not slow"`
 
+## Testing
+
+When creating tests, make sure to:
+  - **Follow existing tests**: Read all existing tests to understand the conventions and style used in the project, and follow them closely, unless there's some clear reason to do otherwise.
+  - Do not use simulation caching (e.g., control.begin(), etc.) in tests, unless you are testing the caching mechanism itself. Note that you can and should use LLM call caching in tests, to reduce costs, but this is different from simulation caching.
+  - Instantiate objects in the conventional way demonstrated in other tests and in the examples of the project, unless there is a good reason to do otherwise. This is particularly important for scenario tests, where we want to reproduce what an actual programmer using TinyTroupe to model his/her scenarios would do.
+
+### Scenario Tests
+Additional guidelines for scenario tests:
+  - Remember that TinyPerson agents are supposed to be autonomous. Therefore, typically, a scenario to test agent behavior will setup things in such a way that the agent is given some kind of task or initial conditions, and then let run to see if the expected results are achieved in the end. The agents might take various actions autonomously before producing the expected result, and the job of the scenario test is to check if such results are achieved autonomously. Unless, of course, the test is about more specific behavioral mechanisms that require finer control, but typically these will be unit tests rather than scenario tests.
+  - Make sure to comment on the scientific aspects of the phenomena being tested, and how they are expected to manifest in the results. 
+  - Try to create scenarios that are realistic, convincing and that could produce some potentially useful business outcome if they were to be run in a real-world setting, even if the scenario is just meant for testing.
+
+
 ## Calling an LLM
 The programs you build might themselves call an LLM. In this case, you should first check which of these two cases is more appropriate:
   1. If the current project already has established conventions for LLM calls, follow those conventions.

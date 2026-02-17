@@ -674,7 +674,13 @@ class TinyPerson(JsonSerializableRegistry):
 
         # A separate function to run before each action, which is not meant to be repeated in case of errors.
         def aux_pre_act():
-            pass
+            # Deliver any pending observations from mental faculties.
+            # This gives faculties that receive asynchronous input (e.g.,
+            # browser state changed by user navigation) the chance to
+            # inject stimuli before the prompt is rebuilt and the LLM
+            # is called.
+            for faculty in self._mental_faculties:
+                faculty.process_observations(self)
 
         # Helper to persist a single action and its side-effects
         def _commit_action(action, role, content):
@@ -767,7 +773,15 @@ class TinyPerson(JsonSerializableRegistry):
 
             # Side-effects via mental faculties
             for faculty in self._mental_faculties:
-                faculty.process_action(self, action)
+                if faculty.process_action(self, action):
+                    # This faculty handled the action.  If it has a
+                    # real-world side-effect delay (e.g., waiting for a
+                    # page to load after a browser click), apply it now
+                    # so that the effect has settled before the next
+                    # action or observation delivery.
+                    if faculty.real_world_side_effect_delay > 0:
+                        import time
+                        time.sleep(faculty.real_world_side_effect_delay)
 
             # count
             self.actions_count += 1

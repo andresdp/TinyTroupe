@@ -527,56 +527,62 @@ class SemanticMemory(TinyMemory):
         if isinstance(value, dict):
             engram = {
                 "role": "assistant",
-                "content": value["content"],
+                "content": value.get("content", ""),
                 "type": value.get(
                     "type", "information"
                 ),  # Default to 'information' if type is not specified
                 "simulation_timestamp": value.get("simulation_timestamp", None),
             }
 
-            # Refine the content of the engram is built based on the type of the value to make it more meaningful.
-            if value["type"] == "action":
+            # Refine the content of the engram based on its type to make it more meaningful.
+            # Use engram["type"] (safely defaulted above) instead of value["type"] to
+            # avoid KeyError when the LLM omits the "type" key.
+            mem_type = engram["type"]
+            mem_ts = engram["simulation_timestamp"]
+            mem_content = engram["content"]
+
+            if mem_type == "action":
                 engram["content"] = (
                     f"# Action performed\n"
-                    + f"I have performed the following action at date and time {value['simulation_timestamp']}:\n\n"
-                    + f" {value['content']}"
+                    + f"I have performed the following action at date and time {mem_ts}:\n\n"
+                    + f" {mem_content}"
                 )
 
-            elif value["type"] == "stimulus":
+            elif mem_type == "stimulus":
                 engram["content"] = (
                     f"# Stimulus\n"
-                    + f"I have received the following stimulus at date and time {value['simulation_timestamp']}:\n\n"
-                    + f" {value['content']}"
+                    + f"I have received the following stimulus at date and time {mem_ts}:\n\n"
+                    + f" {mem_content}"
                 )
-            elif value["type"] == "feedback":
+            elif mem_type == "feedback":
                 engram["content"] = (
                     f"# Feedback\n"
-                    + f"I have received the following feedback at date and time {value['simulation_timestamp']}:\n\n"
-                    + f" {value['content']}"
+                    + f"I have received the following feedback at date and time {mem_ts}:\n\n"
+                    + f" {mem_content}"
                 )
-            elif value["type"] == "consolidated":
+            elif mem_type == "consolidated":
                 engram["content"] = (
                     f"# Consolidated Memory\n"
-                    + f"I have consolidated the following memory at date and time {value['simulation_timestamp']}:\n\n"
-                    + f" {value['content']}"
+                    + f"I have consolidated the following memory at date and time {mem_ts}:\n\n"
+                    + f" {mem_content}"
                 )
-            elif value["type"] == "reflection":
+            elif mem_type == "reflection":
                 engram["content"] = (
                     f"# Reflection\n"
-                    + f"I have reflected on the following memory at date and time {value['simulation_timestamp']}:\n\n"
-                    + f" {value['content']}"
+                    + f"I have reflected on the following memory at date and time {mem_ts}:\n\n"
+                    + f" {mem_content}"
                 )
-            elif value["type"] == "image_description":
+            elif mem_type == "image_description":
                 engram["content"] = (
                     f"# Image Description\n"
-                    + f"I have seen the following image(s) at date and time {value['simulation_timestamp']}:\n\n"
-                    + f" {value['content']}"
+                    + f"I have seen the following image(s) at date and time {mem_ts}:\n\n"
+                    + f" {mem_content}"
                 )
             else:
                 engram["content"] = (
                     f"# Information\n"
-                    + f"I have obtained following information at date and time {value['simulation_timestamp']}:\n\n"
-                    + f" {value['content']}"
+                    + f"I have obtained following information at date and time {mem_ts}:\n\n"
+                    + f" {mem_content}"
                 )
 
             # else: # Anything else here?

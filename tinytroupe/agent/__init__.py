@@ -87,6 +87,7 @@ from .mental_faculty import (
     TinyToolUse,
 )
 from .tiny_person import TinyPerson
+from .web_browser_faculty import TinyWebBrowserFaculty
 
 __all__ = [
     "SemanticMemory",
@@ -98,4 +99,5 @@ __all__ = [
     "FilesAndWebGroundingFaculty",
     "TinyToolUse",
     "TinyPerson",
+    "TinyWebBrowserFaculty",
 ]
