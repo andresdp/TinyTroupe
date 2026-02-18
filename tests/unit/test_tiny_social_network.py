@@ -41,7 +41,7 @@ def test_tiny_social_network_add_relation(setup):
     # Verify relation was added
     assert "colleagues" in network.relations
     assert len(network.relations["colleagues"]) == 1
-    assert (oscar, lisa) in network.relations["colleagues"]
+    assert any(a1 is oscar and a2 is lisa for a1, a2, _ in network.relations["colleagues"])
     
     # Verify agents were added to network
     assert oscar in network.agents
@@ -220,15 +220,15 @@ def test_tiny_social_network_edge_cases(setup):
     # Test adding relation with same agent (self-relation)
     network.add_relation(oscar, oscar, "self")
     assert "self" in network.relations
-    assert (oscar, oscar) in network.relations["self"]
+    assert any(a1 is oscar and a2 is oscar for a1, a2, _ in network.relations["self"])
     
-    # Test adding same relation multiple times
+    # Test adding same relation multiple times (duplicates are now prevented)
     lisa = create_lisa_the_data_scientist()
     network.add_relation(oscar, lisa, "colleagues")
     network.add_relation(oscar, lisa, "colleagues")  # Duplicate
     
-    # Should have two entries for the same relation
-    assert len(network.relations["colleagues"]) == 2
+    # Duplicates are deduplicated so only one entry should exist
+    assert len(network.relations["colleagues"]) == 1
 
 def test_tiny_social_network_empty_relations(setup):
     """Test network behavior with no relations."""
