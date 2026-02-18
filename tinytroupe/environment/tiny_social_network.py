@@ -705,15 +705,24 @@ class TinySocialNetwork(TinyWorld):
         Returns:
             dict: The encoded state.
         """
-        state = super().encode_complete_state()
-
-        # Encode relations with agent names instead of objects
+        # Encode relations with agent names instead of objects *before*
+        # calling super(), because the parent does a deepcopy of __dict__
+        # and agent objects contain unpicklable fields (Console, RLock).
         encoded_relations = {}
         for rel_name, edges in self.relations.items():
             encoded_relations[rel_name] = [
                 (a1.name, a2.name, copy.deepcopy(attrs))
                 for a1, a2, attrs in edges
             ]
+
+        # Temporarily swap in the serialisable version
+        original_relations = self.relations
+        self.relations = encoded_relations
+        try:
+            state = super().encode_complete_state()
+        finally:
+            self.relations = original_relations
+
         state["relations"] = encoded_relations
         state["message_log"] = copy.deepcopy(self.message_log)
         state["_current_step"] = self._current_step

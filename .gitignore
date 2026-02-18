@@ -174,3 +174,7 @@ cython_debug/
 test_credentials.ini
 tests/test_credentials.ini
 test-report-*.html
+
+# Test artifacts
+test-report.html
+test-results.xml
