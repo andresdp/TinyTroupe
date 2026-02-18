@@ -1103,3 +1103,5 @@ class TinySocialNetworkFactory:
                         if random.random() < inter_department_p:
                             net.add_relation(a, b, name=relation_name,
                                              attributes={"cross_department": True})
+
+        return net

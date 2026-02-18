@@ -10,6 +10,6 @@ logger = logging.getLogger("tinytroupe")
 # Exposed API
 ###########################################################################
 from tinytroupe.environment.tiny_world import TinyWorld
-from tinytroupe.environment.tiny_social_network import TinySocialNetwork
+from tinytroupe.environment.tiny_social_network import TinySocialNetwork, TinySocialNetworkFactory
 
-__all__ = ["TinyWorld", "TinySocialNetwork"]
+__all__ = ["TinyWorld", "TinySocialNetwork", "TinySocialNetworkFactory"]
