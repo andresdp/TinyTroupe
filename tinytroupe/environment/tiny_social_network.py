@@ -2,8 +2,10 @@ from tinytroupe.environment.tiny_world import TinyWorld
 from tinytroupe.environment import logger
 
 import copy
+import json
 import random
 import math
+import textwrap
 from collections import deque
 from datetime import datetime, timedelta
 
@@ -1092,7 +1094,7 @@ class TinySocialNetworkFactory:
         return net
 
     @staticmethod
-    def create_corporate_hierarchy(name, agents, ceo=None, managers=None, span_of_control=3, relation_name="reports_to"):
+    def create_corporate_hierarchy(name, agents, ceo=None, managers=None, span_of_control=3, relation_name="reports_to", context=None):
         """
         Creates a tree-shaped corporate hierarchy. If *ceo* is not specified
         the first agent is used. If *managers* is not specified, they are
@@ -1105,6 +1107,11 @@ class TinySocialNetworkFactory:
             managers (list, optional): Agents to serve as managers.
             span_of_control (int): Maximum direct reports per manager.
             relation_name (str): The relation name for edges.
+            context (str, optional): Free-form description of the
+                organizational context or desired constraints (not used by this
+                deterministic variant — see
+                :meth:`create_corporate_hierarchy_with_llm` for the LLM-based
+                version).
 
         Returns:
             TinySocialNetwork: The constructed network.
@@ -1142,7 +1149,7 @@ class TinySocialNetworkFactory:
         return net
 
     @staticmethod
-    def create_workflow_pipeline(name, agents, stages=None, relation_name="workflow"):
+    def create_workflow_pipeline(name, agents, stages=None, relation_name="workflow", context=None):
         """
         Creates a sequential pipeline. If *stages* is not given, each agent
         forms its own stage. Agents within the same stage are fully connected,
@@ -1153,6 +1160,9 @@ class TinySocialNetworkFactory:
             agents (list): List of TinyPerson instances.
             stages (list of lists, optional): Grouping of agents into stages.
             relation_name (str): The relation name for edges.
+            context (str, optional): Free-form description of the workflow
+                context or desired constraints (not used by this deterministic
+                variant — see :meth:`create_workflow_pipeline_with_llm`).
 
         Returns:
             TinySocialNetwork: The constructed network.
@@ -1245,7 +1255,7 @@ class TinySocialNetworkFactory:
         return net
 
     @staticmethod
-    def create_department_network(name, departments, inter_department_p=0.1, relation_name="colleague"):
+    def create_department_network(name, departments, inter_department_p=0.1, relation_name="colleague", context=None):
         """
         Creates a network from a department mapping. Agents within the same
         department are fully connected; agents in different departments are
@@ -1256,6 +1266,10 @@ class TinySocialNetworkFactory:
             departments (dict): Mapping of ``{dept_name: [agents]}``.
             inter_department_p (float): Cross-department edge probability.
             relation_name (str): The relation name for edges.
+            context (str, optional): Free-form description of the
+                organizational context or desired constraints (not used by this
+                deterministic variant — see
+                :meth:`create_department_network_with_llm`).
 
         Returns:
             TinySocialNetwork: The constructed network.
@@ -1289,3 +1303,423 @@ class TinySocialNetworkFactory:
                                              attributes={"cross_department": True})
 
         return net
+
+    #######################################################################
+    # LLM-based factory methods
+    #######################################################################
+
+    # Rough token-per-char ratio for modern tokenizers (≈ 4 chars/token).
+    _CHARS_PER_TOKEN = 4
+    # Conservative default context window used when we cannot determine the
+    # actual model limit.  We leave headroom for the LLM response.
+    _DEFAULT_MAX_INPUT_TOKENS = 100_000
+
+    @staticmethod
+    def _estimate_prompt_tokens(text: str) -> int:
+        """Returns a rough token-count estimate for *text*."""
+        return max(1, len(text) // TinySocialNetworkFactory._CHARS_PER_TOKEN)
+
+    @staticmethod
+    def _validate_prompt_length(prompt_text: str, max_input_tokens: int = None):
+        """Raises ``ValueError`` if *prompt_text* is too long for the model."""
+        limit = max_input_tokens or TinySocialNetworkFactory._DEFAULT_MAX_INPUT_TOKENS
+        est = TinySocialNetworkFactory._estimate_prompt_tokens(prompt_text)
+        if est > limit:
+            raise ValueError(
+                f"The composed prompt is approximately {est} tokens, which "
+                f"exceeds the configured limit of {limit} tokens.  Reduce "
+                f"the number of agents or shorten agent biographies."
+            )
+
+    @staticmethod
+    def _build_agent_roster(agents) -> str:
+        """Returns a numbered roster of agent mini-bios for use in prompts."""
+        lines = []
+        for idx, agent in enumerate(agents, 1):
+            bio = agent.minibio(extended=False)
+            lines.append(f"  {idx}. **{agent.name}** — {bio}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Corporate hierarchy (LLM)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def create_corporate_hierarchy_with_llm(
+        name: str,
+        agents: list,
+        context: str = "",
+        relation_name: str = "reports_to",
+        max_input_tokens: int = None,
+    ) -> "TinySocialNetwork":
+        """
+        Uses an LLM to assign agents to corporate-hierarchy positions
+        (CEO, senior management, middle management, individual contributors)
+        based on each agent's mini-biography, then builds the reporting tree.
+
+        The LLM produces a JSON plan of ``{manager_name: [report_name, …]}``
+        entries. The plan is executed deterministically.
+
+        Args:
+            name (str): Name of the network.
+            agents (list): Pre-created ``TinyPerson`` instances.
+            context (str): Free-form description of the organisation, its
+                industry, culture, or any constraints the user wants to
+                impose (e.g. "a mid-size fintech startup in Berlin").
+            relation_name (str): Relation name for edges.
+            max_input_tokens (int, optional): Override the default maximum
+                input-prompt size.  If the prompt exceeds this limit a
+                ``ValueError`` is raised.
+
+        Returns:
+            TinySocialNetwork: The constructed network.
+        """
+        from tinytroupe.utils.llm import LLMChat
+
+        if len(agents) < 2:
+            return TinySocialNetworkFactory.create_corporate_hierarchy(
+                name, agents, relation_name=relation_name)
+
+        roster = TinySocialNetworkFactory._build_agent_roster(agents)
+        agent_names_json = json.dumps([a.name for a in agents])
+
+        system_prompt = textwrap.dedent("""\
+            You are an expert organisational designer. Given a roster of
+            people and an organisational context you must decide who should
+            occupy which position in a realistic corporate hierarchy.
+
+            Rules:
+            1. Choose exactly ONE person as CEO / top leader.
+            2. Assign a realistic number of middle managers — not everyone
+               can be a manager and not everyone should be a leaf.  Use a
+               span-of-control between 2 and 6 direct reports per manager.
+            3. The remaining people are individual contributors who report
+               to the manager most appropriate for them (based on skills,
+               experience, seniority, domain, etc.).
+            4. Every person must appear exactly once as a report (except the
+               CEO who appears only as a manager).
+            5. Output **only** valid JSON — no commentary.
+
+            Output format (a JSON object):
+            {
+              "hierarchy": {
+                "<manager_name>": ["<report_name>", ...],
+                ...
+              }
+            }
+
+            Every name in the output **must** be taken verbatim from the
+            roster — do not invent new names.
+        """)
+
+        user_prompt = textwrap.dedent(f"""\
+            ## Organisational context
+            {context if context else "A typical business organisation."}
+
+            ## Available people
+            {roster}
+
+            ## Complete list of valid names
+            {agent_names_json}
+
+            Based on each person's background, skills and experience,
+            produce the hierarchy JSON described above.  Make sure the
+            assignments are realistic: senior / experienced people should
+            lead, and domain experts should be grouped under the most
+            relevant manager.
+        """)
+
+        full_prompt = system_prompt + "\n" + user_prompt
+        TinySocialNetworkFactory._validate_prompt_length(full_prompt, max_input_tokens)
+
+        result = LLMChat(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        ).call()
+
+        plan = TinySocialNetworkFactory._parse_llm_json(result, expected_key="hierarchy")
+        return TinySocialNetworkFactory._execute_hierarchy_plan(
+            name, agents, plan, relation_name)
+
+    @staticmethod
+    def _execute_hierarchy_plan(name, agents, plan, relation_name):
+        """Deterministically builds a hierarchy from a ``{manager: [reports]}`` plan."""
+        net = TinySocialNetwork(name)
+        name_to_agent = {a.name: a for a in agents}
+
+        for agent in agents:
+            net.add_agent(agent)
+
+        for manager_name, report_names in plan.items():
+            manager = name_to_agent.get(manager_name)
+            if manager is None:
+                logger.warning(
+                    f"LLM plan references unknown manager '{manager_name}'; skipping.")
+                continue
+            for rname in report_names:
+                report = name_to_agent.get(rname)
+                if report is None:
+                    logger.warning(
+                        f"LLM plan references unknown report '{rname}'; skipping.")
+                    continue
+                net.add_relation(manager, report, name=relation_name,
+                                 attributes={"manager": manager.name, "report": report.name})
+
+        return net
+
+    # ------------------------------------------------------------------
+    # Workflow pipeline (LLM)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def create_workflow_pipeline_with_llm(
+        name: str,
+        agents: list,
+        context: str = "",
+        relation_name: str = "workflow",
+        max_input_tokens: int = None,
+    ) -> "TinySocialNetwork":
+        """
+        Uses an LLM to assign agents to workflow-pipeline stages based on
+        their mini-biographies, then builds the stage graph.
+
+        Args:
+            name (str): Name of the network.
+            agents (list): Pre-created ``TinyPerson`` instances.
+            context (str): Free-form description of the workflow, process
+                or value-chain (e.g. "a software development lifecycle from
+                requirements through deployment").
+            relation_name (str): Relation name for edges.
+            max_input_tokens (int, optional): Maximum input-prompt size.
+
+        Returns:
+            TinySocialNetwork: The constructed network.
+        """
+        from tinytroupe.utils.llm import LLMChat
+
+        if len(agents) < 2:
+            return TinySocialNetworkFactory.create_workflow_pipeline(
+                name, agents, relation_name=relation_name)
+
+        roster = TinySocialNetworkFactory._build_agent_roster(agents)
+        agent_names_json = json.dumps([a.name for a in agents])
+
+        system_prompt = textwrap.dedent("""\
+            You are an expert workflow and process designer. Given a roster
+            of people and a process context you must assign each person to
+            the pipeline stage that best matches their skills and role.
+
+            Rules:
+            1. Create between 2 and 6 named stages that form a sequential
+               pipeline (e.g. "Requirements → Design → Implementation →
+               Testing → Deployment").
+            2. Every person must appear in exactly one stage.
+            3. Each stage must have at least one person.
+            4. Assign people to stages based on their expertise and
+               background — the assignments must be realistic.
+            5. Output **only** valid JSON — no commentary.
+
+            Output format:
+            {
+              "stages": [
+                {"stage_name": "<name>", "members": ["<person_name>", ...]},
+                ...
+              ]
+            }
+
+            Stage order matters: the first entry is the start of the
+            pipeline, the last entry is the end. Every name in the output
+            **must** be taken verbatim from the roster.
+        """)
+
+        user_prompt = textwrap.dedent(f"""\
+            ## Workflow / process context
+            {context if context else "A typical business workflow."}
+
+            ## Available people
+            {roster}
+
+            ## Complete list of valid names
+            {agent_names_json}
+
+            Assign each person to the most appropriate stage and produce
+            the JSON described above.
+        """)
+
+        full_prompt = system_prompt + "\n" + user_prompt
+        TinySocialNetworkFactory._validate_prompt_length(full_prompt, max_input_tokens)
+
+        result = LLMChat(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        ).call()
+
+        plan = TinySocialNetworkFactory._parse_llm_json(result, expected_key="stages")
+        return TinySocialNetworkFactory._execute_pipeline_plan(
+            name, agents, plan, relation_name)
+
+    @staticmethod
+    def _execute_pipeline_plan(name, agents, stage_plan, relation_name):
+        """Deterministically builds a pipeline from a list of stage dicts."""
+        name_to_agent = {a.name: a for a in agents}
+        stages = []
+        for entry in stage_plan:
+            stage_agents = []
+            for pname in entry.get("members", []):
+                agent = name_to_agent.get(pname)
+                if agent is not None:
+                    stage_agents.append(agent)
+                else:
+                    logger.warning(
+                        f"LLM plan references unknown agent '{pname}'; skipping.")
+            if stage_agents:
+                stages.append(stage_agents)
+
+        return TinySocialNetworkFactory.create_workflow_pipeline(
+            name, agents, stages=stages, relation_name=relation_name)
+
+    # ------------------------------------------------------------------
+    # Department network (LLM)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def create_department_network_with_llm(
+        name: str,
+        agents: list,
+        context: str = "",
+        inter_department_p: float = 0.1,
+        relation_name: str = "colleague",
+        max_input_tokens: int = None,
+    ) -> "TinySocialNetwork":
+        """
+        Uses an LLM to assign agents to departments based on their
+        mini-biographies, then builds the department network.
+
+        Args:
+            name (str): Name of the network.
+            agents (list): Pre-created ``TinyPerson`` instances.
+            context (str): Free-form description of the organisation or
+                desired department structure (e.g. "a hospital with
+                clinical, research and administrative departments").
+            inter_department_p (float): Random cross-department edge
+                probability (passed through to
+                :meth:`create_department_network`).
+            relation_name (str): Relation name for edges.
+            max_input_tokens (int, optional): Maximum input-prompt size.
+
+        Returns:
+            TinySocialNetwork: The constructed network.
+        """
+        from tinytroupe.utils.llm import LLMChat
+
+        if len(agents) < 2:
+            return TinySocialNetworkFactory.create_department_network(
+                name, {"default": agents}, relation_name=relation_name)
+
+        roster = TinySocialNetworkFactory._build_agent_roster(agents)
+        agent_names_json = json.dumps([a.name for a in agents])
+
+        system_prompt = textwrap.dedent("""\
+            You are an expert organisational designer. Given a roster of
+            people and an organisational context you must assign each
+            person to the department that best matches their background,
+            skills and role.
+
+            Rules:
+            1. Create between 2 and 8 departments with realistic names
+               that fit the context (e.g. "Engineering", "Sales",
+               "Finance", "Operations", …).
+            2. Every person must appear in exactly one department.
+            3. Each department must have at least one person.
+            4. Assignments must be realistic — match people to departments
+               based on their expertise and experience.
+            5. Output **only** valid JSON — no commentary.
+
+            Output format:
+            {
+              "departments": {
+                "<department_name>": ["<person_name>", ...],
+                ...
+              }
+            }
+
+            Every name in the output **must** be taken verbatim from the
+            roster.
+        """)
+
+        user_prompt = textwrap.dedent(f"""\
+            ## Organisational context
+            {context if context else "A typical business organisation."}
+
+            ## Available people
+            {roster}
+
+            ## Complete list of valid names
+            {agent_names_json}
+
+            Assign each person to the most appropriate department and
+            produce the JSON described above.
+        """)
+
+        full_prompt = system_prompt + "\n" + user_prompt
+        TinySocialNetworkFactory._validate_prompt_length(full_prompt, max_input_tokens)
+
+        result = LLMChat(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        ).call()
+
+        plan = TinySocialNetworkFactory._parse_llm_json(result, expected_key="departments")
+        return TinySocialNetworkFactory._execute_department_plan(
+            name, agents, plan, inter_department_p, relation_name)
+
+    @staticmethod
+    def _execute_department_plan(name, agents, dept_plan, inter_department_p, relation_name):
+        """Deterministically builds a department network from a dept mapping."""
+        name_to_agent = {a.name: a for a in agents}
+        departments = {}
+        for dept_name, member_names in dept_plan.items():
+            members = []
+            for pname in member_names:
+                agent = name_to_agent.get(pname)
+                if agent is not None:
+                    members.append(agent)
+                else:
+                    logger.warning(
+                        f"LLM plan references unknown agent '{pname}'; skipping.")
+            if members:
+                departments[dept_name] = members
+
+        return TinySocialNetworkFactory.create_department_network(
+            name, departments, inter_department_p=inter_department_p,
+            relation_name=relation_name)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_llm_json(raw, expected_key: str):
+        """Extracts JSON from the LLM response and returns the value under
+        *expected_key*.  Raises ``ValueError`` on failure."""
+        from tinytroupe.utils.llm import extract_json
+
+        parsed = extract_json(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"LLM returned a non-object JSON value: {type(parsed).__name__}")
+
+        if expected_key in parsed:
+            return parsed[expected_key]
+
+        # The LLM might have returned the expected structure at the top level
+        # (without wrapping it under the expected key).  Fall back gracefully.
+        if expected_key in ("hierarchy", "departments") and any(
+            isinstance(v, list) for v in parsed.values()
+        ):
+            return parsed
+
+        raise ValueError(
+            f"LLM response JSON missing expected key '{expected_key}'.  "
+            f"Keys found: {list(parsed.keys())}"
+        )

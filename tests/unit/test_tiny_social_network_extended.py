@@ -1215,3 +1215,151 @@ def test_add_relation_with_attributes_auto_updates_description(setup):
     assert len(oscar_entry) == 1
     assert "manager" in oscar_entry[0]["relation_description"].lower(), \
         "Relation description should mention 'manager' for Lisa's perspective."
+
+
+###########################################################################
+# LLM-based factory — deterministic plan execution tests
+###########################################################################
+
+def test_execute_hierarchy_plan(setup):
+    """_execute_hierarchy_plan should build a valid hierarchy from a JSON plan."""
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    plan = {
+        oscar.name: [lisa.name, marcos.name],
+    }
+
+    net = TinySocialNetworkFactory._execute_hierarchy_plan(
+        "Hierarchy Plan Test", [oscar, lisa, marcos], plan, "reports_to"
+    )
+
+    assert len(net.agents) == 3
+    assert net.is_in_relation_with(oscar, lisa, "reports_to")
+    assert net.is_in_relation_with(oscar, marcos, "reports_to")
+
+    # Verify manager/report attributes
+    attrs = net.get_relation_attributes(oscar, lisa, "reports_to")
+    assert attrs["manager"] == oscar.name
+    assert attrs["report"] == lisa.name
+
+
+def test_execute_hierarchy_plan_skips_unknown_names(setup):
+    """Unknown names in the plan should be skipped gracefully."""
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    plan = {
+        oscar.name: [lisa.name, "Unknown Person"],
+    }
+
+    net = TinySocialNetworkFactory._execute_hierarchy_plan(
+        "Bad Names Test", [oscar, lisa], plan, "reports_to"
+    )
+
+    assert net.is_in_relation_with(oscar, lisa, "reports_to")
+    # Unknown person should be silently skipped
+    assert len(net._unique_edges()) == 1
+
+
+def test_execute_pipeline_plan(setup):
+    """_execute_pipeline_plan should build stages from a JSON plan."""
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    stage_plan = [
+        {"stage_name": "Design", "members": [oscar.name]},
+        {"stage_name": "Analysis", "members": [lisa.name]},
+        {"stage_name": "Review", "members": [marcos.name]},
+    ]
+
+    net = TinySocialNetworkFactory._execute_pipeline_plan(
+        "Pipeline Plan Test", [oscar, lisa, marcos], stage_plan, "workflow"
+    )
+
+    assert len(net.agents) == 3
+    # Adjacent stages should be connected
+    assert net.is_in_relation_with(oscar, lisa, "workflow")
+    assert net.is_in_relation_with(lisa, marcos, "workflow")
+    # Non-adjacent stages should NOT be connected
+    assert not net.is_in_relation_with(oscar, marcos, "workflow")
+
+
+def test_execute_department_plan(setup):
+    """_execute_department_plan should build departments from a JSON plan."""
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    dept_plan = {
+        "Engineering": [oscar.name, lisa.name],
+        "Medical": [marcos.name],
+    }
+
+    net = TinySocialNetworkFactory._execute_department_plan(
+        "Dept Plan Test", [oscar, lisa, marcos], dept_plan, 0.0, "colleague"
+    )
+
+    assert len(net.agents) == 3
+    # Same department -> connected
+    assert net.is_in_relation_with(oscar, lisa, "colleague")
+    # Different departments with p=0 -> not connected
+    assert not net.is_in_relation_with(oscar, marcos, "colleague")
+
+
+def test_validate_prompt_length_ok(setup):
+    """Short prompts should pass validation."""
+    # Should not raise
+    TinySocialNetworkFactory._validate_prompt_length("short prompt", max_input_tokens=1000)
+
+
+def test_validate_prompt_length_too_long(setup):
+    """Overly long prompts should raise ValueError."""
+    long_text = "x" * 10000  # ~2500 tokens
+    with pytest.raises(ValueError, match="exceeds the configured limit"):
+        TinySocialNetworkFactory._validate_prompt_length(long_text, max_input_tokens=100)
+
+
+def test_build_agent_roster(setup):
+    """_build_agent_roster should produce a numbered list of agent bios."""
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    roster = TinySocialNetworkFactory._build_agent_roster([oscar, lisa])
+
+    assert oscar.name in roster
+    assert lisa.name in roster
+    assert "1." in roster
+    assert "2." in roster
+
+
+def test_parse_llm_json_with_expected_key(setup):
+    """_parse_llm_json should extract the expected key."""
+    raw = '{"hierarchy": {"Alice": ["Bob"]}}'
+    result = TinySocialNetworkFactory._parse_llm_json(raw, "hierarchy")
+    assert result == {"Alice": ["Bob"]}
+
+
+def test_parse_llm_json_fallback_no_key(setup):
+    """_parse_llm_json should fall back when the expected key is missing
+    but the structure looks right."""
+    # Hierarchy without wrapper
+    raw = '{"Alice": ["Bob", "Carol"]}'
+    result = TinySocialNetworkFactory._parse_llm_json(raw, "hierarchy")
+    assert result == {"Alice": ["Bob", "Carol"]}
+
+
+def test_parse_llm_json_raises_on_missing(setup):
+    """_parse_llm_json should raise ValueError when key is missing and
+    no fallback applies."""
+    raw = '{"something_else": 42}'
+    with pytest.raises(ValueError, match="missing expected key"):
+        TinySocialNetworkFactory._parse_llm_json(raw, "hierarchy")
+
+
+def test_estimate_prompt_tokens(setup):
+    """Token estimation should be roughly 1 token per 4 chars."""
+    assert TinySocialNetworkFactory._estimate_prompt_tokens("abcd") == 1
+    assert TinySocialNetworkFactory._estimate_prompt_tokens("a" * 400) == 100
