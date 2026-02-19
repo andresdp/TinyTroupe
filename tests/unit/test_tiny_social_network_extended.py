@@ -980,3 +980,113 @@ def test_factory_department_edge_attrs_reach_agent(setup):
     lisa_entry = [e for e in oscar_accessible if e["name"] == lisa.name]
     assert len(lisa_entry) == 1
     assert "Engineering" in lisa_entry[0]["relation_description"]
+
+
+###########################################################################
+# Communication constraint enforcement
+###########################################################################
+
+def test_talk_blocked_when_target_not_connected(setup):
+    """TALK to an agent that exists in the network but is NOT connected
+    via any relation must be blocked — the message must NOT be delivered."""
+    network = TinySocialNetwork("Talk Block Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    # oscar ↔ lisa are connected, marcos is in the network but NOT
+    # connected to oscar
+    network.add_relation(oscar, lisa, "colleagues")
+    network.add_agent(marcos)
+    network._update_agents_contexts()
+
+    # Oscar tries to TALK directly to Marcos — should be blocked
+    network._handle_talk(oscar, "Hey Marcos, can you help?", marcos.name)
+
+    # No message should have been logged to Marcos
+    msgs_to_marcos = network.get_message_log(target=marcos)
+    assert len(msgs_to_marcos) == 0, \
+        "TALK to an unreachable target must be blocked, but a message was delivered."
+
+
+def test_talk_to_connected_agent_succeeds(setup):
+    """TALK to a connected agent should work normally."""
+    network = TinySocialNetwork("Talk OK Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network._update_agents_contexts()
+
+    network._handle_talk(oscar, "Hello Lisa!", lisa.name)
+
+    msgs = network.get_message_log(source=oscar, target=lisa)
+    assert len(msgs) == 1
+    assert msgs[0]["content"] == "Hello Lisa!"
+
+
+def test_talk_no_target_broadcasts_to_connected_only(setup):
+    """TALK with no target should broadcast to connected agents only."""
+    network = TinySocialNetwork("Talk Broadcast Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.add_agent(marcos)
+    network._update_agents_contexts()
+
+    # TALK with no target — should broadcast to connected agents only (Lisa)
+    network._handle_talk(oscar, "Anyone there?", None)
+
+    msgs = network.get_message_log(source=oscar)
+    targets = [m["target"] for m in msgs]
+    assert lisa.name in targets
+    assert marcos.name not in targets, \
+        "Broadcast must be limited to connected agents."
+
+
+def test_reach_out_blocked_when_not_connected(setup):
+    """REACH_OUT to an agent not connected via the network must be blocked."""
+    network = TinySocialNetwork("Reach Out Block Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.add_agent(marcos)
+    network._update_agents_contexts()
+
+    network._handle_reach_out(oscar, "Let's connect!", marcos.name)
+
+    # No message should have been logged
+    msgs_to_marcos = network.get_message_log(target=marcos)
+    assert len(msgs_to_marcos) == 0, \
+        "REACH_OUT to an unreachable target must be blocked."
+
+
+def test_handle_actions_blocks_talk_to_unreachable(setup):
+    """_handle_actions dispatching a TALK to an unreachable agent should block."""
+    network = TinySocialNetwork("Actions Block Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.add_agent(marcos)
+    network._update_agents_contexts()
+
+    actions = [
+        {"type": "TALK", "content": "Hi Marcos", "target": marcos.name},
+    ]
+    network._handle_actions(oscar, actions)
+
+    assert network.get_message_count(target=marcos) == 0, \
+        "TALK via _handle_actions to unreachable agent must be blocked."
+
+    # But talking to Lisa should still work
+    actions2 = [
+        {"type": "TALK", "content": "Hi Lisa", "target": lisa.name},
+    ]
+    network._handle_actions(oscar, actions2)
+    assert network.get_message_count(target=lisa) == 1

@@ -348,9 +348,11 @@ class TinySocialNetwork(TinyWorld):
     def _handle_talk(self, source_agent: TinyPerson, content: str, target: str):
         """
         Handles the TALK action. Messages are only delivered between connected
-        agents. If *broadcast_if_no_target* is True and no specific target is
-        given (or the target is not found), the message is broadcast to all
-        connected agents.
+        agents. If a specific target is named but is not reachable via the
+        network, the action is **blocked** and the source agent is notified.
+        If no specific target is given (or the target name is not found in
+        the environment) and *broadcast_if_no_target* is True, the message is
+        broadcast to all connected agents.
 
         Args:
             source_agent (TinyPerson): The agent that issued the action.
@@ -360,16 +362,32 @@ class TinySocialNetwork(TinyWorld):
         target_agent = self.get_agent_by_name(target) if target else None
 
         if target_agent is not None and self.is_in_relation_with(source_agent, target_agent):
+            # Target exists and is connected — deliver normally.
             logger.debug(
                 f"[{self.name}] Delivering message from {name_or_empty(source_agent)} to {name_or_empty(target_agent)}."
             )
             self._log_message(source_agent, target_agent, content, "TALK")
             target_agent.listen(content, source=source_agent)
+
+        elif target_agent is not None:
+            # Target exists in the environment but is NOT connected to the
+            # source — block the message and let the source know.
+            logger.debug(
+                f"[{self.name}] TALK blocked: {name_or_empty(source_agent)} -> {target} (no relation)."
+            )
+            source_agent.socialize(
+                f"{target} is not reachable from your current social network, so your message was not delivered.",
+                source=self,
+            )
+
         elif self.broadcast_if_no_target:
+            # No specific target (or target not found) — broadcast to
+            # connected agents.
             self.broadcast(content, source=source_agent)
+
         else:
             logger.debug(
-                f"[{self.name}] TALK blocked: {name_or_empty(source_agent)} -> {target} (no relation or not found)."
+                f"[{self.name}] TALK blocked: {name_or_empty(source_agent)} -> {target} (not found and broadcast disabled)."
             )
 
     @transactional()
