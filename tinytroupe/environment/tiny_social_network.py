@@ -320,6 +320,59 @@ class TinySocialNetwork(TinyWorld):
     #######################################################################
 
     @transactional()
+    def _handle_actions(self, source: TinyPerson, actions: list):
+        """
+        Handles the actions issued by agents, enforcing network constraints
+        for **all** action types that target another agent.
+
+        Any action (not just TALK or REACH_OUT) whose ``target`` refers to an
+        agent present in the environment but **not** connected to the source
+        via any relation is blocked, and the source agent is notified.
+
+        Actions without a target, or whose target is not found in the
+        environment, are passed through to the parent handler which
+        dispatches to the type-specific handlers.
+
+        Args:
+            source (TinyPerson): The agent that issued the actions.
+            actions (list): A list of action dicts (each with at least a
+                ``"type"`` key, and optionally ``"content"`` and ``"target"``).
+        """
+        allowed_actions = []
+        for action in actions:
+            action_type = action["type"]
+            target = action.get("target")
+
+            # Actions that don't target anyone pass through unconditionally.
+            if not target:
+                allowed_actions.append(action)
+                continue
+
+            target_agent = self.get_agent_by_name(target)
+
+            if target_agent is not None and not self.is_in_relation_with(source, target_agent):
+                # Target exists in the environment but is NOT reachable via
+                # the network — block and notify.
+                logger.debug(
+                    f"[{self.name}] {action_type} blocked: "
+                    f"{name_or_empty(source)} -> {target} (no relation)."
+                )
+                source.socialize(
+                    f"{target} is not reachable from your current social "
+                    f"network, so your {action_type} action was not delivered.",
+                    source=self,
+                )
+            else:
+                # Either the target is connected, or the target name doesn't
+                # match any agent in the environment (the specific handler
+                # can decide what to do).
+                allowed_actions.append(action)
+
+        # Delegate the surviving actions to the parent's dispatcher.
+        if allowed_actions:
+            super()._handle_actions(source, allowed_actions)
+
+    @transactional()
     def _handle_reach_out(self, source_agent: TinyPerson, content: str, target: str):
         """
         Handles the REACH_OUT action. Only succeeds when the source and

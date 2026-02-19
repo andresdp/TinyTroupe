@@ -1090,3 +1090,81 @@ def test_handle_actions_blocks_talk_to_unreachable(setup):
     ]
     network._handle_actions(oscar, actions2)
     assert network.get_message_count(target=lisa) == 1
+
+
+def test_handle_actions_blocks_any_action_type_to_unreachable(setup):
+    """Any action type targeting an unreachable agent should be blocked,
+    not just TALK or REACH_OUT."""
+    network = TinySocialNetwork("General Block Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.add_agent(marcos)
+    network._update_agents_contexts()
+
+    # A hypothetical custom action type targeting an unreachable agent
+    actions = [
+        {"type": "CUSTOM_ACTION", "content": "Do something with Marcos", "target": marcos.name},
+    ]
+    network._handle_actions(oscar, actions)
+
+    # The action should have been blocked — verify via message log
+    # (no messages of any kind should have been delivered to marcos)
+    assert network.get_message_count(target=marcos) == 0, \
+        "Custom action to unreachable agent must be blocked."
+
+    # But a custom action targeting a connected agent should pass through
+    actions2 = [
+        {"type": "CUSTOM_ACTION", "content": "Do something with Lisa", "target": lisa.name},
+    ]
+    # This should not raise — the action passes through _handle_actions
+    # and reaches the parent dispatcher (which may not know what to do
+    # with CUSTOM_ACTION, but that's fine — the point is it's not blocked)
+    network._handle_actions(oscar, actions2)
+
+
+def test_handle_actions_allows_untargeted_actions(setup):
+    """Actions without a target (like THINK, DONE) should never be blocked."""
+    network = TinySocialNetwork("Untargeted Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_agent(oscar)
+    network.add_agent(lisa)
+    # No relations — oscar is isolated
+    network._update_agents_contexts()
+
+    # Untargeted actions should pass through even with no relations
+    actions = [
+        {"type": "THINK", "content": "Thinking about something"},
+        {"type": "DONE", "content": ""},
+    ]
+    # Should not raise or block
+    network._handle_actions(oscar, actions)
+
+
+def test_handle_actions_mixed_targeted_and_untargeted(setup):
+    """A mix of targeted and untargeted actions: only unreachable-targeted
+    ones should be filtered out."""
+    network = TinySocialNetwork("Mixed Actions Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.add_agent(marcos)
+    network._update_agents_contexts()
+
+    actions = [
+        {"type": "THINK", "content": "Let me prepare"},
+        {"type": "TALK", "content": "Hey Marcos", "target": marcos.name},   # should be blocked
+        {"type": "TALK", "content": "Hey Lisa", "target": lisa.name},       # should pass
+    ]
+    network._handle_actions(oscar, actions)
+
+    assert network.get_message_count(target=marcos) == 0, \
+        "Targeted action to unreachable agent must be blocked."
+    assert network.get_message_count(target=lisa) == 1, \
+        "Targeted action to connected agent must pass through."
