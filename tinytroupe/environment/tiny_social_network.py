@@ -85,6 +85,12 @@ class TinySocialNetwork(TinyWorld):
                 return self
 
         self.relations[name].append((agent_1, agent_2, attrs))
+
+        # Immediately refresh agent accessibility so that neighbors are
+        # visible right away — the user should never have to call
+        # _update_agents_contexts() manually.
+        self._update_agents_contexts()
+
         return self
 
     @transactional()
@@ -116,6 +122,10 @@ class TinySocialNetwork(TinyWorld):
                 # clean up empty relation lists
                 if not self.relations[rel_name]:
                     del self.relations[rel_name]
+
+        # Immediately refresh agent accessibility so that removed neighbors
+        # are no longer visible.
+        self._update_agents_contexts()
 
         return self
 
