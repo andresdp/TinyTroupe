@@ -123,7 +123,6 @@ def test_tiny_social_network_agent_accessibility(setup):
     
     # Add a relation and update contexts
     network.add_relation(oscar, lisa, "colleagues")
-    network._update_agents_contexts()
     
     # Now oscar and lisa should be accessible to each other
     # (Exact verification depends on TinyPerson.accessible_agents implementation)
@@ -147,7 +146,6 @@ def test_tiny_social_network_reach_out_action(setup):
     
     # Add relation between oscar and lisa only
     network.add_relation(oscar, lisa, "colleagues")
-    network._update_agents_contexts()
     
     # Test that relations were properly established
     assert network.is_in_relation_with(oscar, lisa, "colleagues"), "Oscar and Lisa should be colleagues"

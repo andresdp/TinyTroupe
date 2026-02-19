@@ -305,7 +305,6 @@ def test_message_logging(setup):
     marcos = create_marcos_the_physician()
 
     network.add_relation(oscar, lisa, "colleagues")
-    network._update_agents_contexts()
 
     # Simulate a TALK action
     network._handle_talk(oscar, "Hello Lisa", lisa.name)
@@ -339,7 +338,6 @@ def test_message_log_blocked_actions(setup):
     network.add_agent(lisa)
     network.add_agent(marcos)
     network.add_relation(oscar, lisa, "colleagues")
-    network._update_agents_contexts()
 
     # oscar tries to talk to marcos (no relation, no broadcast)
     network._handle_talk(oscar, "Hello Marcos", marcos.name)
@@ -506,7 +504,6 @@ def test_encode_decode_complete_state(setup):
 
     network.add_relation(oscar, lisa, "colleagues", attributes={"dept": "Eng"})
     network.add_relation(lisa, marcos, "friends")
-    network._update_agents_contexts()
 
     # simulate some messages
     network._handle_talk(oscar, "Hello Lisa!", lisa.name)
@@ -603,7 +600,6 @@ def test_social_network_cache_consistency(setup):
 
         network = TinySocialNetwork("Consistency Network")
         network.add_relation(oscar, lisa, "colleagues")
-        network._update_agents_contexts()
 
         control.checkpoint()
         control.end()
@@ -634,7 +630,6 @@ def test_social_network_broadcast_thought(setup):
     lisa = create_lisa_the_data_scientist()
 
     network.add_relation(oscar, lisa, "colleagues")
-    network._update_agents_contexts()
 
     # broadcast_thought is inherited from TinyWorld and should work
     network.broadcast_thought("Think about innovation")
@@ -734,7 +729,6 @@ def test_social_network_pretty_current_interactions(setup):
     lisa = create_lisa_the_data_scientist()
 
     network.add_relation(oscar, lisa, "colleagues")
-    network._update_agents_contexts()
 
     result = network.pretty_current_interactions()
     assert isinstance(result, str)
@@ -751,7 +745,6 @@ def test_social_network_broadcast_only_to_connected(setup):
     network.add_agent(lisa)
     network.add_agent(marcos)
     network.add_relation(oscar, lisa, "colleagues")
-    network._update_agents_contexts()
 
     # Broadcast from oscar should only reach lisa (connected), not marcos
     network.broadcast("Hello everyone!", source=oscar)
@@ -784,7 +777,6 @@ def test_social_network_handle_actions(setup):
     lisa = create_lisa_the_data_scientist()
 
     network.add_relation(oscar, lisa, "colleagues")
-    network._update_agents_contexts()
 
     actions = [
         {"type": "TALK", "content": "Hi Lisa", "target": lisa.name},
@@ -818,7 +810,6 @@ def test_edge_attributes_flow_to_agent_description_simple(setup):
 
     network.add_relation(oscar, lisa, "colleagues",
                          attributes={"description": "My close collaborator in the design team"})
-    network._update_agents_contexts()
 
     # The relation_description visible to Oscar about Lisa should be the
     # explicit description, not just the relation name.
@@ -837,7 +828,6 @@ def test_edge_attributes_flow_rich_attrs(setup):
 
     network.add_relation(oscar, lisa, "colleague",
                          attributes={"department": "Engineering", "weight": 0.8})
-    network._update_agents_contexts()
 
     accessible = oscar._mental_state["accessible_agents"]
     lisa_entry = [e for e in accessible if e["name"] == lisa.name]
@@ -858,7 +848,6 @@ def test_edge_attributes_hierarchy_roles(setup):
 
     network.add_relation(oscar, lisa, "reports_to",
                          attributes={"manager": oscar.name, "report": lisa.name})
-    network._update_agents_contexts()
 
     # From Lisa's perspective: Oscar is "your manager"
     lisa_accessible = lisa._mental_state["accessible_agents"]
@@ -881,7 +870,6 @@ def test_edge_attributes_cross_department(setup):
 
     network.add_relation(oscar, lisa, "colleague",
                          attributes={"cross_department": True})
-    network._update_agents_contexts()
 
     accessible = oscar._mental_state["accessible_agents"]
     lisa_entry = [e for e in accessible if e["name"] == lisa.name]
@@ -896,7 +884,6 @@ def test_edge_attributes_default_fallback(setup):
     lisa = create_lisa_the_data_scientist()
 
     network.add_relation(oscar, lisa, "friends")
-    network._update_agents_contexts()
 
     accessible = oscar._mental_state["accessible_agents"]
     lisa_entry = [e for e in accessible if e["name"] == lisa.name]
@@ -1016,7 +1003,6 @@ def test_talk_to_connected_agent_succeeds(setup):
     lisa = create_lisa_the_data_scientist()
 
     network.add_relation(oscar, lisa, "colleagues")
-    network._update_agents_contexts()
 
     network._handle_talk(oscar, "Hello Lisa!", lisa.name)
 
@@ -1168,3 +1154,64 @@ def test_handle_actions_mixed_targeted_and_untargeted(setup):
         "Targeted action to unreachable agent must be blocked."
     assert network.get_message_count(target=lisa) == 1, \
         "Targeted action to connected agent must pass through."
+
+
+###########################################################################
+# Auto-update of agent contexts on relation changes
+###########################################################################
+
+def test_add_relation_auto_updates_accessibility(setup):
+    """Agents must become mutually accessible immediately after add_relation,
+    without any explicit call to _update_agents_contexts()."""
+    network = TinySocialNetwork("Auto Update Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    # After add_relation, oscar and lisa should immediately see each other.
+    network.add_relation(oscar, lisa, "colleagues")
+
+    assert lisa in oscar.accessible_agents, \
+        "Lisa should be accessible to Oscar right after add_relation."
+    assert oscar in lisa.accessible_agents, \
+        "Oscar should be accessible to Lisa right after add_relation."
+
+    # Marcos is not in any relation — should not be accessible.
+    network.add_agent(marcos)
+    assert marcos not in oscar.accessible_agents
+    assert marcos not in lisa.accessible_agents
+
+
+def test_remove_relation_auto_updates_accessibility(setup):
+    """When a relation is removed the agents should immediately lose
+    visibility of each other (assuming no other relation connects them)."""
+    network = TinySocialNetwork("Auto Remove Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    assert lisa in oscar.accessible_agents
+
+    network.remove_relation(oscar, lisa, "colleagues")
+    assert lisa not in oscar.accessible_agents, \
+        "Lisa should no longer be accessible after the relation is removed."
+    assert oscar not in lisa.accessible_agents, \
+        "Oscar should no longer be accessible after the relation is removed."
+
+
+def test_add_relation_with_attributes_auto_updates_description(setup):
+    """Edge attributes should immediately flow into the agent's relation
+    description without needing a manual _update_agents_contexts() call."""
+    network = TinySocialNetwork("Attr Auto Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "reports_to",
+                         attributes={"manager": oscar.name, "report": lisa.name})
+
+    # Lisa should see Oscar with a "manager" annotation
+    lisa_accessible = lisa._mental_state["accessible_agents"]
+    oscar_entry = [e for e in lisa_accessible if e["name"] == oscar.name]
+    assert len(oscar_entry) == 1
+    assert "manager" in oscar_entry[0]["relation_description"].lower(), \
+        "Relation description should mention 'manager' for Lisa's perspective."
