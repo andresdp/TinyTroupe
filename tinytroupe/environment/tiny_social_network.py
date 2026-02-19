@@ -232,11 +232,57 @@ class TinySocialNetwork(TinyWorld):
     # Simulation overrides
     #######################################################################
 
+    @staticmethod
+    def _build_relation_description(relation_name: str, attrs: dict, perspective_agent=None, other_agent=None) -> str:
+        """
+        Builds a human-readable description of a relation edge that will be
+        communicated to agents via the prompt. The description incorporates
+        all meaningful edge attributes so that the LLM understands the nature
+        of the relationship.
+
+        Args:
+            relation_name (str): The relation type name (e.g. ``"reports_to"``).
+            attrs (dict): The edge attributes dictionary.
+            perspective_agent (TinyPerson, optional): The agent receiving this
+                description (used for directional roles like manager/report).
+            other_agent (TinyPerson, optional): The other agent in the relation.
+
+        Returns:
+            str: A descriptive string for use in the agent's social context.
+        """
+        # If the user provided an explicit "description", use it directly.
+        if "description" in attrs:
+            return attrs["description"]
+
+        parts = [f"Relation: {relation_name}"]
+
+        # Directional role hints (e.g. manager / report)
+        if perspective_agent is not None and other_agent is not None:
+            if attrs.get("manager") == other_agent.name and attrs.get("report") == perspective_agent.name:
+                parts.append(f"(your manager)")
+            elif attrs.get("report") == other_agent.name and attrs.get("manager") == perspective_agent.name:
+                parts.append(f"(your direct report)")
+
+        # Include selected common attributes in a readable form.
+        for key in ("department", "stage", "stage_from", "stage_to", "weight", "role"):
+            if key in attrs:
+                parts.append(f"{key}={attrs[key]}")
+
+        if attrs.get("cross_department"):
+            parts.append("(cross-department link)")
+
+        return "; ".join(parts)
+
     @transactional()
     def _update_agents_contexts(self):
         """
         Updates agent accessibility based on the current relation graph. Only
         agents that share a relation edge can see each other.
+
+        The relation description communicated to each agent is built from **all**
+        meaningful edge attributes (not just a ``"description"`` key), so the
+        agent's LLM prompt includes contextual information such as the relation
+        type, departmental affiliation, hierarchical role, edge weight, etc.
         """
         for agent in self.agents:
             agent.make_all_agents_inaccessible()
@@ -244,9 +290,16 @@ class TinySocialNetwork(TinyWorld):
         for relation_name, edges in self.relations.items():
             logger.debug(f"Updating agents' observations for relation '{relation_name}'.")
             for agent_1, agent_2, attrs in edges:
-                desc = attrs.get("description", relation_name)
-                agent_1.make_agent_accessible(agent_2, relation_description=desc)
-                agent_2.make_agent_accessible(agent_1, relation_description=desc)
+                desc_for_1 = self._build_relation_description(
+                    relation_name, attrs,
+                    perspective_agent=agent_1, other_agent=agent_2,
+                )
+                desc_for_2 = self._build_relation_description(
+                    relation_name, attrs,
+                    perspective_agent=agent_2, other_agent=agent_1,
+                )
+                agent_1.make_agent_accessible(agent_2, relation_description=desc_for_1)
+                agent_2.make_agent_accessible(agent_1, relation_description=desc_for_2)
 
     @transactional()
     def _step(self, timedelta_per_step=None, randomize_agents_order=True, parallelize=True):
@@ -785,7 +838,48 @@ class TinySocialNetworkFactory:
     """
     Factory for creating pre-configured :class:`TinySocialNetwork` instances
     with various well-known graph topologies.
+
+    All ``create_*`` methods require a list of pre-created ``TinyPerson``
+    instances.  To conveniently generate those agents from a
+    ``TinyPersonFactory``, use the :meth:`populate_agents` helper first::
+
+        factory = TinyPersonFactory("A tech startup in Austin.")
+        agents = TinySocialNetworkFactory.populate_agents(
+            factory, number_of_agents=10,
+            agent_particularities="Software engineers with varied seniority."
+        )
+        net = TinySocialNetworkFactory.create_random_network("startup", agents)
     """
+
+    @staticmethod
+    def populate_agents(
+        person_factory,
+        number_of_agents: int,
+        agent_particularities: str = None,
+    ) -> list:
+        """
+        Uses a :class:`TinyPersonFactory` to generate agents that can then be
+        passed to any of the ``create_*`` topology methods.
+
+        This is the recommended way to obtain agents when you do not want to
+        create them manually. Every returned agent is a fully initialised
+        ``TinyPerson`` — there are **no empty nodes**.
+
+        Args:
+            person_factory: A ``TinyPersonFactory`` instance (already
+                configured with a context / sampling space).
+            number_of_agents (int): How many agents to create.
+            agent_particularities (str, optional): An additional prompt hint
+                passed to ``generate_people`` to steer persona generation.
+
+        Returns:
+            list: A list of ``TinyPerson`` instances ready for use with any
+                ``create_*`` method.
+        """
+        return person_factory.generate_people(
+            number_of_people=number_of_agents,
+            agent_particularities=agent_particularities,
+        )
 
     @staticmethod
     def create_random_network(name, agents, p=0.3, relation_name="connected"):

@@ -804,3 +804,179 @@ def test_social_network_repr(setup):
     r = repr(network)
     assert "TinySocialNetwork" in r
     assert "Repr Test" in r
+
+
+###########################################################################
+# Edge attributes → agent relation descriptions
+###########################################################################
+
+def test_edge_attributes_flow_to_agent_description_simple(setup):
+    """Edge attributes with an explicit 'description' key should be used as-is."""
+    network = TinySocialNetwork("Desc Flow Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "colleagues",
+                         attributes={"description": "My close collaborator in the design team"})
+    network._update_agents_contexts()
+
+    # The relation_description visible to Oscar about Lisa should be the
+    # explicit description, not just the relation name.
+    accessible = oscar._mental_state["accessible_agents"]
+    lisa_entry = [e for e in accessible if e["name"] == lisa.name]
+    assert len(lisa_entry) == 1
+    assert lisa_entry[0]["relation_description"] == "My close collaborator in the design team"
+
+
+def test_edge_attributes_flow_rich_attrs(setup):
+    """When no explicit 'description' is given, a rich description must be
+    synthesised from the edge attributes (department, weight, etc.)."""
+    network = TinySocialNetwork("Rich Attr Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "colleague",
+                         attributes={"department": "Engineering", "weight": 0.8})
+    network._update_agents_contexts()
+
+    accessible = oscar._mental_state["accessible_agents"]
+    lisa_entry = [e for e in accessible if e["name"] == lisa.name]
+    assert len(lisa_entry) == 1
+    desc = lisa_entry[0]["relation_description"]
+    # The description should include the relation name AND the attributes
+    assert "colleague" in desc
+    assert "Engineering" in desc
+    assert "0.8" in desc
+
+
+def test_edge_attributes_hierarchy_roles(setup):
+    """In a corporate hierarchy, the manager and report roles should appear
+    in the relation description from the correct perspective."""
+    network = TinySocialNetwork("Hierarchy Roles Test")
+    oscar = create_oscar_the_architect()   # will be manager
+    lisa = create_lisa_the_data_scientist() # will be report
+
+    network.add_relation(oscar, lisa, "reports_to",
+                         attributes={"manager": oscar.name, "report": lisa.name})
+    network._update_agents_contexts()
+
+    # From Lisa's perspective: Oscar is "your manager"
+    lisa_accessible = lisa._mental_state["accessible_agents"]
+    oscar_entry = [e for e in lisa_accessible if e["name"] == oscar.name]
+    assert len(oscar_entry) == 1
+    assert "manager" in oscar_entry[0]["relation_description"].lower()
+
+    # From Oscar's perspective: Lisa is "your direct report"
+    oscar_accessible = oscar._mental_state["accessible_agents"]
+    lisa_entry = [e for e in oscar_accessible if e["name"] == lisa.name]
+    assert len(lisa_entry) == 1
+    assert "report" in lisa_entry[0]["relation_description"].lower()
+
+
+def test_edge_attributes_cross_department(setup):
+    """The cross_department flag should be reflected in the description."""
+    network = TinySocialNetwork("Cross Dept Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "colleague",
+                         attributes={"cross_department": True})
+    network._update_agents_contexts()
+
+    accessible = oscar._mental_state["accessible_agents"]
+    lisa_entry = [e for e in accessible if e["name"] == lisa.name]
+    assert len(lisa_entry) == 1
+    assert "cross-department" in lisa_entry[0]["relation_description"].lower()
+
+
+def test_edge_attributes_default_fallback(setup):
+    """With no attributes at all, the relation name itself should be used."""
+    network = TinySocialNetwork("Fallback Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "friends")
+    network._update_agents_contexts()
+
+    accessible = oscar._mental_state["accessible_agents"]
+    lisa_entry = [e for e in accessible if e["name"] == lisa.name]
+    assert len(lisa_entry) == 1
+    assert "friends" in lisa_entry[0]["relation_description"].lower()
+
+
+###########################################################################
+# Factory — no empty nodes
+###########################################################################
+
+def test_factory_no_empty_nodes_random(setup):
+    """Every agent in a factory-created random network must be a real
+    TinyPerson — there are no 'empty' placeholder nodes."""
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+    agents = [oscar, lisa, marcos]
+
+    net = TinySocialNetworkFactory.create_random_network("NoEmpty", agents, p=0.5)
+
+    # All nodes in the network are actual TinyPerson objects
+    assert len(net.agents) == 3
+    for agent in net.agents:
+        assert isinstance(agent, TinyPerson)
+        assert agent.name  # every agent has a name
+
+
+def test_factory_no_empty_nodes_hierarchy(setup):
+    """Corporate hierarchy should also have no empty nodes."""
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+    agents = [oscar, lisa, marcos]
+
+    net = TinySocialNetworkFactory.create_corporate_hierarchy("NoEmpty", agents)
+
+    assert len(net.agents) == 3
+    for agent in net.agents:
+        assert isinstance(agent, TinyPerson)
+        assert agent.name
+
+
+def test_factory_hierarchy_edge_attrs_reach_agent(setup):
+    """Factory-generated hierarchy edges should produce rich descriptions
+    that reach the agent prompt (not just 'reports_to')."""
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    net = TinySocialNetworkFactory.create_corporate_hierarchy(
+        "HierDesc", [oscar, lisa, marcos], ceo=oscar, span_of_control=2
+    )
+    net._update_agents_contexts()
+
+    # Lisa should see Oscar with a "manager" annotation
+    lisa_accessible = lisa._mental_state["accessible_agents"]
+    oscar_entry = [e for e in lisa_accessible if e["name"] == oscar.name]
+    assert len(oscar_entry) == 1
+    assert "manager" in oscar_entry[0]["relation_description"].lower()
+
+
+def test_factory_department_edge_attrs_reach_agent(setup):
+    """Factory-generated department edges should include department info
+    in the description reaching the agent."""
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    departments = {
+        "Engineering": [oscar, lisa],
+        "Medical": [marcos],
+    }
+    net = TinySocialNetworkFactory.create_department_network(
+        "DeptDesc", departments, inter_department_p=0.0
+    )
+    net._update_agents_contexts()
+
+    # Oscar and Lisa should see each other with "Engineering" mentioned
+    oscar_accessible = oscar._mental_state["accessible_agents"]
+    lisa_entry = [e for e in oscar_accessible if e["name"] == lisa.name]
+    assert len(lisa_entry) == 1
+    assert "Engineering" in lisa_entry[0]["relation_description"]
