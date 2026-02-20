@@ -1363,3 +1363,113 @@ def test_estimate_prompt_tokens(setup):
     """Token estimation should be roughly 1 token per 4 chars."""
     assert TinySocialNetworkFactory._estimate_prompt_tokens("abcd") == 1
     assert TinySocialNetworkFactory._estimate_prompt_tokens("a" * 400) == 100
+
+
+###########################################################################
+# Visualization
+###########################################################################
+
+def test_visualize_returns_figure(setup):
+    """visualize() should return a matplotlib Figure object."""
+    import matplotlib
+    matplotlib.use("Agg")  # non-interactive backend for CI
+
+    network = TinySocialNetwork("Vis Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.add_relation(lisa, marcos, "friends")
+
+    fig = network.visualize(show=False)
+    assert fig is not None
+    assert isinstance(fig, matplotlib.figure.Figure)
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+def test_visualize_empty_network(setup):
+    """visualize() should handle an empty network gracefully."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    network = TinySocialNetwork("Empty Vis")
+    fig = network.visualize(show=False)
+    assert fig is not None
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+def test_visualize_single_agent(setup):
+    """visualize() should handle a network with agents but no edges."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    network = TinySocialNetwork("Solo Vis")
+    oscar = create_oscar_the_architect()
+    network.add_agent(oscar)
+
+    fig = network.visualize(show=False)
+    assert fig is not None
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+def test_visualize_save_to_file(setup, tmp_path):
+    """visualize(save_path=...) should write a PNG file."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    network = TinySocialNetwork("Save Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    network.add_relation(oscar, lisa, "colleagues")
+
+    save_path = str(tmp_path / "test_network_vis.png")
+    fig = network.visualize(show=False, save_path=save_path)
+    assert os.path.exists(save_path)
+    assert os.path.getsize(save_path) > 0
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+def test_visualize_circular_layout(setup):
+    """visualize() should accept layout='circular'."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    network = TinySocialNetwork("Circular Vis")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+    network.add_relation(oscar, lisa, "colleagues")
+    network.add_relation(lisa, marcos, "colleagues")
+
+    fig = network.visualize(show=False, layout="circular")
+    assert fig is not None
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+def test_visualize_multiple_relation_types(setup):
+    """visualize() should color-code edges by relation type and show a legend."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    network = TinySocialNetwork("Multi-Rel Vis")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.add_relation(oscar, marcos, "friends")
+
+    fig = network.visualize(show=False)
+    ax = fig.axes[0]
+    # Should have a legend with 2 entries
+    legend = ax.get_legend()
+    assert legend is not None
+    assert len(legend.get_texts()) == 2
+    import matplotlib.pyplot as plt
+    plt.close(fig)
