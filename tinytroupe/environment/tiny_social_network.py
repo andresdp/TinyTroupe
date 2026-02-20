@@ -1336,7 +1336,7 @@ class TinySocialNetworkFactory:
         """Returns a numbered roster of agent mini-bios for use in prompts."""
         lines = []
         for idx, agent in enumerate(agents, 1):
-            bio = agent.minibio(extended=False)
+            bio = agent.minibio(extended=True)
             lines.append(f"  {idx}. **{agent.name}** — {bio}")
         return "\n".join(lines)
 
