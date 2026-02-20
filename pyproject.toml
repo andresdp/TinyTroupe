@@ -30,11 +30,11 @@ dependencies = [
     "msal",
     "rich", "requests", "chevron",
     "llama-index", "llama-index-embeddings-huggingface", "llama-index-readers-web", "llama-index-embeddings-azure-openai",
-    "pypandoc", "docx", "markdown",
+    "pypandoc", "python-docx", "markdown",
     "jupyter",
     "matplotlib",
+    "seaborn",
     "pydantic>=2.5.0",
-    "pypandoc",
     "textdistance",
     "scipy"
 ]

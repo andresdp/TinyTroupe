@@ -1,4 +1,6 @@
 # TinyTroupe 🤠🤓🥸🧐
+[![Core Tests](https://github.com/microsoft/TinyTroupe/actions/workflows/core-tests.yml/badge.svg)](https://github.com/microsoft/TinyTroupe/actions/workflows/core-tests.yml)
+
 *LLM-powered multiagent persona simulation for imagination enhancement and business insights.*
 
 <p align="center">
@@ -169,9 +171,11 @@ You can find other examples in the [examples/](./examples/) folder.
 
 To run the library, you need:
   - Python 3.10 or higher. We'll assume you are using [Anaconda](https://docs.anaconda.com/anaconda/install/), but you can use other Python distributions.
+  - [Git](https://git-scm.com/downloads) for cloning the repository and for installing the library via `pip`.
   - Access to Azure OpenAI Service or Open AI GPT-4 APIs. You can get access to the Azure OpenAI Service [here](https://azure.microsoft.com/en-us/products/ai-services/openai-service), and to the OpenAI API [here](https://platform.openai.com/). 
       * For Azure OpenAI Service, you will need to set the `AZURE_OPENAI_KEY` and `AZURE_OPENAI_ENDPOINT` environment variables to your API key and endpoint, respectively.
       * For OpenAI, you will need to set the `OPENAI_API_KEY` environment variable to your API key.
+      * For example, on Linux/macOS: `export OPENAI_API_KEY=your-key-here`, or on Windows (PowerShell): `$env:OPENAI_API_KEY="your-key-here"`. To persist it, add it to your shell profile or use `setx OPENAI_API_KEY "your-key-here"` on Windows.
   - By default, TinyTroupe `config.ini` is set to use OpenAI API with `gpt-5-mini` as the main model. The previous default (`gpt-4.1-mini`) is now considered legacy but is still expected to work. You can customize these values by including your own `config.ini` file in the same folder as the program or notebook you are running. An example of a `config.ini` file is provided in the [examples/](./examples/) folder.
 
 >[!IMPORTANT]
@@ -215,7 +219,11 @@ To actually run the examples, you need to download them to your local machine. Y
     git clone https://github.com/microsoft/tinytroupe
     cd tinytroupe
     ```
-2. You can now run the examples in the [examples/](./examples/) folder, or adapt them to create your own custom simulations. 
+2. You can now run the examples in the [examples/](./examples/) folder, or adapt them to create your own custom simulations. The examples are Jupyter notebooks, so you can start them with:
+    ```bash
+    jupyter notebook
+    ```
+    Then navigate to the `examples/` folder in the browser interface that opens.
 
 
 ### Local development

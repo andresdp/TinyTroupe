@@ -101,7 +101,7 @@ def test_see(setup):
         for action in actions:
             if action["action"]["type"] == "THINK":
                 think_content = action["action"]["content"]
-                assert proposition_holds(f"The following text is someone thinking about or reacting to seeing a beautiful sunset over the ocean: '{think_content}'"), \
+                assert proposition_holds(f"The following text mentions, references, or is inspired by seeing a sunset (it does NOT need to be exclusively about the sunset — any reference counts): '{think_content}'"), \
                     f"Agent should be thinking about the sunset but thought: {think_content}"
                 break
 

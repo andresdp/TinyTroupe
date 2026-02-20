@@ -16,7 +16,7 @@ print(
     """
 !!!!
 DISCLAIMER: TinyTroupe relies on Artificial Intelligence (AI) models to generate content. 
-The AI models are not perfect and may produce inappropriate or inacurate results. 
+The AI models are not perfect and may produce inappropriate or inaccurate results. 
 For any serious or consequential use, please review the generated content before using it.
 !!!!
 """

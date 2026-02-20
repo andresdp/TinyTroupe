@@ -56,6 +56,10 @@ class OpenAIClient:
         self._cost_stats_lock = threading.RLock()
         self._reset_cost_stats()
 
+        # Per-thread tracking of the last cache key used, so it can be
+        # selectively invalidated on retry without cross-thread interference.
+        self._thread_local = threading.local()
+
         self.set_api_cache(cache_api_calls, cache_file_name)
 
     @staticmethod
@@ -88,8 +92,16 @@ class OpenAIClient:
         self.cache_api_calls = cache_api_calls
         self.cache_file_name = cache_file_name
         if self.cache_api_calls:
+            abs_path = os.path.abspath(self.cache_file_name)
+            exists = os.path.exists(abs_path)
+            logger.info(
+                f"API cache file location: {abs_path} (exists: {exists})"
+            )
             # load the cache, if any
             self.api_cache = self._load_cache()
+            logger.info(
+                f"API cache loaded with {len(self.api_cache)} entries."
+            )
 
     def _reset_cost_stats(self):
         """
@@ -260,6 +272,7 @@ class OpenAIClient:
                 # call the model, either from the cache or from the API
                 ###############################################################
                 cache_key = str((model, chat_api_params))  # need string to be hashable
+                self._thread_local.last_cache_key = cache_key  # per-thread tracking
 
                 pre_cached_response = self._get_cached_response(cache_key)
 
@@ -458,6 +471,33 @@ class OpenAIClient:
             logger.warning(f"Could not reconstruct response from cache: {e}")
             return None
 
+    def invalidate_last_cache_entry(self):
+        """
+        Removes the most recent cache entry (from the last ``send_message`` call
+        **on the current thread**).
+
+        Uses thread-local storage so that concurrent threads never
+        accidentally invalidate each other's cache entries.
+
+        This is intended to be called on retry paths (e.g., ``repeat_on_error``)
+        so that a bad cached response does not block all subsequent attempts.
+        """
+        key = getattr(self._thread_local, "last_cache_key", None)
+        if key is None:
+            return
+
+        cache_store = getattr(self, "api_cache", None)
+        if cache_store is None:
+            return
+
+        with self._cache_lock:
+            if key in cache_store:
+                del cache_store[key]
+                self._save_cache()
+                logger.info("Invalidated last API cache entry (retry path).")
+
+        self._thread_local.last_cache_key = None
+
     def _get_cached_response(self, cache_key):
         if not self.cache_api_calls:
             return None
@@ -470,6 +510,7 @@ class OpenAIClient:
             cached_dict = cache_store.get(cache_key)
             if cached_dict is None:
                 return None
+            logger.info("API cache hit — returning cached LLM response.")
             # Reconstruct the ChatCompletion object from the cached dict
             return self._from_cached_format(cached_dict)
 

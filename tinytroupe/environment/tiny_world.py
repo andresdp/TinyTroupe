@@ -28,11 +28,17 @@ class TinyWorld:
     # Whether to display environments communications or not, for all environments.
     communication_display = True
 
+    # Class-level default for initial_datetime. When set (e.g. during testing),
+    # new TinyWorld instances that don't receive an explicit initial_datetime
+    # will use this value instead of datetime.now(). This keeps cache keys
+    # stable across test runs.
+    default_initial_datetime = None
+
     def __init__(
         self,
         name: str = None,
         agents=[],
-        initial_datetime=datetime.now(),
+        initial_datetime=None,
         interventions=[],
         broadcast_if_no_target=True,
         max_additional_targets_to_display=3,
@@ -43,8 +49,8 @@ class TinyWorld:
         Args:
             name (str): The name of the environment.
             agents (list): A list of agents to add to the environment.
-            initial_datetifme (datetime): The initial datetime of the environment, or None (i.e., explicit time is optional).
-                Defaults to the current datetime in the real world.
+            initial_datetime (datetime): The initial datetime of the environment, or None (i.e., explicit time is optional).
+                Defaults to ``default_initial_datetime`` if set, otherwise the current real-world datetime.
             interventions (list): A list of interventions to apply in the environment at each simulation step.
             broadcast_if_no_target (bool): If True, broadcast actions if the target of an action is not found.
             max_additional_targets_to_display (int): The maximum number of additional targets to display in a communication. If None,
@@ -56,7 +62,12 @@ class TinyWorld:
         else:
             self.name = f"TinyWorld {utils.fresh_id(self.__class__.__name__)}"
 
-        self.current_datetime = initial_datetime
+        if initial_datetime is not None:
+            self.current_datetime = initial_datetime
+        elif self.__class__.default_initial_datetime is not None:
+            self.current_datetime = self.__class__.default_initial_datetime
+        else:
+            self.current_datetime = datetime.now()
         self.broadcast_if_no_target = broadcast_if_no_target
         self.simulation_id = None  # will be reset later if the agent is used within a specific simulation scope
 

@@ -425,15 +425,27 @@ class ActionGenerator(JsonSerializableRegistry):
         )
 
         # Support both single-action and multi-action payloads
-        if "actions" in content and isinstance(content.get("actions"), list):
-            actions = content["actions"]
+        if "actions" in content:
+            actions_val = content["actions"]
+            if isinstance(actions_val, list):
+                actions = actions_val
+            elif isinstance(actions_val, dict):
+                # LLM returned a single action dict instead of a list
+                actions = [actions_val]
+            else:
+                logger.warning(f"[{agent.name}] 'actions' key present but not a list or dict: {type(actions_val)}. Falling back to DONE.")
+                actions = [{"type": "DONE", "content": "", "target": ""}]
             # Ensure the sequence ends with DONE
             if not actions or actions[-1].get("type") != "DONE":
                 actions.append({"type": "DONE", "content": "", "target": ""})
             return actions, role, content
-        else:
+        elif "action" in content:
             action = content["action"]
             return action, role, content
+        else:
+            # Neither key present — log and raise so @repeat_on_error can retry
+            logger.warning(f"[{agent.name}] Response missing both 'actions' and 'action' keys. Content keys: {list(content.keys())}")
+            raise KeyError(f"Response missing both 'actions' and 'action' keys: {list(content.keys())}")
 
     ###############################################################################################
     # Multimodal / vision helpers
