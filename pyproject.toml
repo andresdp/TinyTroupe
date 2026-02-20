@@ -33,6 +33,7 @@ dependencies = [
     "pypandoc", "docx", "markdown",
     "jupyter",
     "matplotlib",
+    "networkx",
     "pydantic>=2.5.0",
     "pypandoc",
     "textdistance",

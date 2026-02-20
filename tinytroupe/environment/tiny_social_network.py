@@ -915,11 +915,12 @@ class TinySocialNetwork(TinyWorld):
                   show=True):
         """
         Renders a graphical visualization of the social network using
-        *matplotlib*.  Works both in Jupyter notebooks (displayed inline)
-        and in standalone scripts (opens a window or saves to file).
+        `networkx <https://networkx.org/>`_ and *matplotlib*.  Works both
+        in Jupyter notebooks (displayed inline) and in standalone scripts
+        (opens a window or saves to file).
 
-        Edges are color-coded by relation name. A legend is included when
-        there is more than one relation type.
+        Edges are color-coded by relation name.  A legend is included
+        whenever there is at least one relation type.
 
         Args:
             title (str, optional): Title displayed above the figure.
@@ -934,22 +935,18 @@ class TinySocialNetwork(TinyWorld):
             with_labels (bool): Whether to draw agent-name labels.
             layout (str): Layout algorithm — ``"spring"`` (default),
                 ``"circular"``, ``"shell"``, or ``"kamada_kawai"``.
-            show (bool): Whether to call ``plt.show()``. Set to ``False``
+            show (bool): Whether to call ``plt.show()``.  Set to ``False``
                 when running in non-interactive environments or tests.
 
         Returns:
             matplotlib.figure.Figure: The rendered figure object.
         """
-        import matplotlib
         import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
+        import networkx as nx
 
-        # ---- build node list and positions ----
-        agents = list(self.agents)
-        n = len(agents)
-        agent_idx = {a: i for i, a in enumerate(agents)}
-
-        if n == 0:
+        # ---- empty-network shortcut ----
+        if not self.agents:
             fig, ax = plt.subplots(figsize=figsize)
             ax.set_title(title or self.name)
             ax.text(0.5, 0.5, "(empty network)", ha="center", va="center",
@@ -961,47 +958,57 @@ class TinySocialNetwork(TinyWorld):
                 plt.show()
             return fig
 
-        # Adjacency for layout computation
-        adj = {i: set() for i in range(n)}
-        for edge_list in self.relations.values():
+        # ---- build a networkx graph ----
+        G = nx.Graph()
+        for agent in self.agents:
+            G.add_node(agent.name)
+
+        relation_names = list(self.relations.keys())
+        cmap = plt.get_cmap("tab10")
+        relation_colors = {rn: cmap(i % 10) for i, rn in enumerate(relation_names)}
+
+        # Group edges by relation for color-coding
+        edges_by_relation: dict[str, list[tuple]] = {rn: [] for rn in relation_names}
+        for rname, edge_list in self.relations.items():
             for a1, a2, _ in edge_list:
-                i, j = agent_idx[a1], agent_idx[a2]
-                adj[i].add(j)
-                adj[j].add(i)
+                edge = (a1.name, a2.name)
+                if edge not in edges_by_relation[rname]:
+                    edges_by_relation[rname].append(edge)
+                    G.add_edge(*edge)
 
         # ---- layout ----
-        pos = self._compute_layout(n, adj, layout)
+        layout_funcs = {
+            "spring": nx.spring_layout,
+            "circular": nx.circular_layout,
+            "shell": nx.shell_layout,
+            "kamada_kawai": nx.kamada_kawai_layout,
+        }
+        layout_fn = layout_funcs.get(layout, nx.spring_layout)
+        pos = layout_fn(G)
 
         # ---- draw ----
         fig, ax = plt.subplots(figsize=figsize)
         ax.set_title(title or self.name, fontsize=14, fontweight="bold", pad=12)
-        ax.axis("off")
 
-        # Color palette for relation types
-        relation_names = list(self.relations.keys())
-        cmap = plt.get_cmap("tab10")
-        relation_colors = {rname: cmap(i % 10) for i, rname in enumerate(relation_names)}
+        # Edges (color-coded per relation type)
+        for rname in relation_names:
+            nx.draw_networkx_edges(
+                G, pos, edgelist=edges_by_relation[rname],
+                edge_color=[relation_colors[rname]],
+                width=edge_width, ax=ax,
+            )
 
-        # Draw edges
-        for rname, edge_list in self.relations.items():
-            color = relation_colors[rname]
-            for a1, a2, attrs in edge_list:
-                x = [pos[agent_idx[a1]][0], pos[agent_idx[a2]][0]]
-                y = [pos[agent_idx[a1]][1], pos[agent_idx[a2]][1]]
-                ax.plot(x, y, color=color, linewidth=edge_width, zorder=1)
+        # Nodes
+        nx.draw_networkx_nodes(
+            G, pos, node_color=node_color, node_size=node_size,
+            edgecolors="white", linewidths=1.5, ax=ax,
+        )
 
-        # Draw nodes
-        xs = [pos[i][0] for i in range(n)]
-        ys = [pos[i][1] for i in range(n)]
-        ax.scatter(xs, ys, s=node_size, c=node_color, edgecolors="white",
-                   linewidths=1.5, zorder=2)
-
-        # Draw labels
+        # Labels
         if with_labels:
-            for i, agent in enumerate(agents):
-                ax.annotate(agent.name, (pos[i][0], pos[i][1]),
-                            fontsize=font_size, ha="center", va="center",
-                            fontweight="bold", zorder=3)
+            nx.draw_networkx_labels(
+                G, pos, font_size=font_size, font_weight="bold", ax=ax,
+            )
 
         # Legend
         if relation_names:
@@ -1009,6 +1016,7 @@ class TinySocialNetwork(TinyWorld):
                        for rn in relation_names]
             ax.legend(handles=patches, loc="upper left", fontsize=font_size)
 
+        ax.axis("off")
         fig.tight_layout()
 
         if save_path:
@@ -1017,84 +1025,6 @@ class TinySocialNetwork(TinyWorld):
             plt.show()
 
         return fig
-
-    @staticmethod
-    def _compute_layout(n, adj, algorithm):
-        """Computes 2-D positions for *n* nodes using the requested algorithm.
-
-        Args:
-            n (int): Number of nodes.
-            adj (dict): Adjacency dict ``{node_index: set_of_neighbor_indices}``.
-            algorithm (str): ``"spring"``, ``"circular"``, ``"shell"``, or
-                ``"kamada_kawai"``.
-
-        Returns:
-            dict: ``{node_index: (x, y)}``.
-        """
-        if algorithm == "circular":
-            return {
-                i: (math.cos(2 * math.pi * i / n),
-                    math.sin(2 * math.pi * i / n))
-                for i in range(n)
-            }
-
-        if algorithm == "shell":
-            # Place nodes in concentric shells; single shell here.
-            return {
-                i: (math.cos(2 * math.pi * i / n) * (1 + 0.3 * (i % 2)),
-                    math.sin(2 * math.pi * i / n) * (1 + 0.3 * (i % 2)))
-                for i in range(n)
-            }
-
-        # Fruchterman-Reingold spring layout (default & "kamada_kawai" fallback)
-        pos = {i: (random.uniform(-1, 1), random.uniform(-1, 1)) for i in range(n)}
-        if n <= 1:
-            return pos
-
-        iterations = 50
-        area = 1.0
-        k = math.sqrt(area / n)
-
-        for _ in range(iterations):
-            disp = {i: [0.0, 0.0] for i in range(n)}
-
-            # Repulsive forces
-            for i in range(n):
-                for j in range(i + 1, n):
-                    dx = pos[i][0] - pos[j][0]
-                    dy = pos[i][1] - pos[j][1]
-                    dist = max(math.sqrt(dx * dx + dy * dy), 0.01)
-                    force = k * k / dist
-                    fx, fy = force * dx / dist, force * dy / dist
-                    disp[i][0] += fx
-                    disp[i][1] += fy
-                    disp[j][0] -= fx
-                    disp[j][1] -= fy
-
-            # Attractive forces
-            for i in range(n):
-                for j in adj[i]:
-                    if j > i:
-                        dx = pos[i][0] - pos[j][0]
-                        dy = pos[i][1] - pos[j][1]
-                        dist = max(math.sqrt(dx * dx + dy * dy), 0.01)
-                        force = dist * dist / k
-                        fx, fy = force * dx / dist, force * dy / dist
-                        disp[i][0] -= fx
-                        disp[i][1] -= fy
-                        disp[j][0] += fx
-                        disp[j][1] += fy
-
-            # Apply with temperature cooling
-            temp = area / ((_ + 1) * 2)
-            for i in range(n):
-                d = math.sqrt(disp[i][0] ** 2 + disp[i][1] ** 2)
-                if d > 0:
-                    scale = min(d, temp) / d
-                    pos[i] = (pos[i][0] + disp[i][0] * scale,
-                              pos[i][1] + disp[i][1] * scale)
-
-        return pos
 
     #######################################################################
     # Representation
