@@ -41,6 +41,10 @@ class TinySocialNetwork(TinyWorld):
         # {relation_name: [(agent_1, agent_2, attributes_dict), ...]}
         self.relations = {}
 
+        # {agent_name: annotation_string} — per-node context annotations
+        # that describe the role or meaning of a position in the network.
+        self.node_annotations = {}
+
         # Message log for tracking all communications
         self.message_log = []
 
@@ -217,6 +221,100 @@ class TinySocialNetwork(TinyWorld):
         return results
 
     #######################################################################
+    # Node annotations
+    #######################################################################
+
+    def set_node_annotation(self, agent, annotation: str):
+        """
+        Sets a context annotation for a node (agent) in the network.
+
+        The annotation describes the role, position, or meaning of the
+        node and is automatically injected into the agent's context
+        whenever :meth:`_update_agents_contexts` runs. When the agent is
+        removed from the network the annotation is discarded and the
+        agent's context is updated accordingly.
+
+        Args:
+            agent (TinyPerson): The agent whose node to annotate.
+            annotation (str): A human-readable description of the node's
+                role or meaning (e.g. "CEO — responsible for overall
+                strategy and final decisions").
+
+        Returns:
+            Self: This network, for method chaining.
+        """
+        if agent not in self.agents:
+            self.add_agent(agent)
+
+        self.node_annotations[agent.name] = annotation
+        self._update_agents_contexts()
+        return self
+
+    def remove_node_annotation(self, agent):
+        """
+        Removes the context annotation for a node, if one exists.
+
+        The agent's context is refreshed immediately so the annotation
+        information vanishes from the agent's prompt.
+
+        Args:
+            agent (TinyPerson): The agent whose annotation to remove.
+
+        Returns:
+            Self: This network, for method chaining.
+        """
+        if agent.name in self.node_annotations:
+            del self.node_annotations[agent.name]
+            # Clear the annotation from the agent's context
+            if agent in self.agents:
+                agent.change_context([])
+        return self
+
+    def get_node_annotation(self, agent) -> str:
+        """
+        Returns the current annotation for a node, or ``None``.
+
+        Args:
+            agent (TinyPerson): The agent to query.
+
+        Returns:
+            str or None: The annotation string, or ``None`` if unset.
+        """
+        return self.node_annotations.get(agent.name)
+
+    def add_agent(self, agent, annotation: str = None):
+        """
+        Adds an agent to the network, optionally setting a node annotation.
+
+        Args:
+            agent (TinyPerson): The agent to add.
+            annotation (str, optional): A description of the role this
+                node represents in the network.
+
+        Returns:
+            Self: This network, for method chaining.
+        """
+        super().add_agent(agent)
+        if annotation is not None:
+            self.node_annotations[agent.name] = annotation
+            self._update_agents_contexts()
+        return self
+
+    def remove_agent(self, agent):
+        """
+        Removes an agent from the network, discarding any node annotation.
+
+        Args:
+            agent (TinyPerson): The agent to remove.
+
+        Returns:
+            Self: This network, for method chaining.
+        """
+        self.node_annotations.pop(agent.name, None)
+        super().remove_agent(agent)
+        return self
+
+    #######################################################################
     # Helpers — connected neighbours
     #######################################################################
 
@@ -295,6 +393,9 @@ class TinySocialNetwork(TinyWorld):
         meaningful edge attributes (not just a ``"description"`` key), so the
         agent's LLM prompt includes contextual information such as the relation
         type, departmental affiliation, hierarchical role, edge weight, etc.
+
+        If a node has a context annotation (see :meth:`set_node_annotation`),
+        it is injected into the agent's context via :meth:`change_context`.
         """
         for agent in self.agents:
             agent.make_all_agents_inaccessible()
@@ -312,6 +413,12 @@ class TinySocialNetwork(TinyWorld):
                 )
                 agent_1.make_agent_accessible(agent_2, relation_description=desc_for_1)
                 agent_2.make_agent_accessible(agent_1, relation_description=desc_for_2)
+
+        # Inject node annotations into each agent's context.
+        for agent in self.agents:
+            annotation = self.node_annotations.get(agent.name)
+            if annotation:
+                agent.change_context([f"Your role in this network: {annotation}"])
 
     @transactional()
     def _step(self, timedelta_per_step=None, randomize_agents_order=True, parallelize=True):
@@ -862,6 +969,7 @@ class TinySocialNetwork(TinyWorld):
         state["relations"] = encoded_relations
         state["message_log"] = copy.deepcopy(self.message_log)
         state["_current_step"] = self._current_step
+        state["node_annotations"] = copy.deepcopy(self.node_annotations)
 
         return state
 
@@ -881,6 +989,7 @@ class TinySocialNetwork(TinyWorld):
         encoded_relations = state.pop("relations", {})
         message_log = state.pop("message_log", [])
         current_step = state.pop("_current_step", 0)
+        node_annotations = state.pop("node_annotations", {})
 
         # Let the parent restore agents and other base fields
         super().decode_complete_state(state)
@@ -902,6 +1011,7 @@ class TinySocialNetwork(TinyWorld):
 
         self.message_log = message_log
         self._current_step = current_step
+        self.node_annotations = node_annotations
 
         return self
 

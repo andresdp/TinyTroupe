@@ -1473,3 +1473,124 @@ def test_visualize_multiple_relation_types(setup):
     assert len(legend.get_texts()) == 2
     import matplotlib.pyplot as plt
     plt.close(fig)
+
+
+###########################################################################
+# Node annotations
+###########################################################################
+
+def test_set_node_annotation_updates_context(setup):
+    """set_node_annotation should inject the annotation into the agent's context."""
+    network = TinySocialNetwork("Annotation Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.set_node_annotation(oscar, "Lead Architect — owns technical vision")
+
+    ctx = oscar._mental_state.get("context", [])
+    assert any("Lead Architect" in str(c) for c in ctx), \
+        f"Expected annotation in context, got: {ctx}"
+
+
+def test_remove_node_annotation_clears_context(setup):
+    """remove_node_annotation should remove the annotation from the agent's context."""
+    network = TinySocialNetwork("Remove Annotation Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.set_node_annotation(oscar, "Lead Architect — owns technical vision")
+
+    # Verify it's there
+    ctx = oscar._mental_state.get("context", [])
+    assert any("Lead Architect" in str(c) for c in ctx)
+
+    # Remove and verify it's gone
+    network.remove_node_annotation(oscar)
+    ctx = oscar._mental_state.get("context", [])
+    assert not any("Lead Architect" in str(c) for c in ctx), \
+        f"Annotation should be gone, got: {ctx}"
+
+
+def test_remove_agent_clears_annotation(setup):
+    """Removing an agent should discard its node annotation."""
+    network = TinySocialNetwork("Agent Removal Test")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.set_node_annotation(oscar, "CTO")
+
+    assert network.get_node_annotation(oscar) == "CTO"
+
+    network.remove_agent(oscar)
+    assert network.get_node_annotation(oscar) is None
+
+
+def test_add_agent_with_annotation(setup):
+    """add_agent(annotation=...) should set the annotation immediately."""
+    network = TinySocialNetwork("Add With Annotation")
+    oscar = create_oscar_the_architect()
+
+    network.add_agent(oscar, annotation="VP of Engineering")
+
+    assert network.get_node_annotation(oscar) == "VP of Engineering"
+
+
+def test_get_node_annotation_returns_none_for_unannotated(setup):
+    """get_node_annotation should return None when no annotation is set."""
+    network = TinySocialNetwork("No Annotation")
+    oscar = create_oscar_the_architect()
+    network.add_agent(oscar)
+
+    assert network.get_node_annotation(oscar) is None
+
+
+def test_node_annotation_survives_encode_decode(setup):
+    """Node annotations should be preserved across encode/decode cycles."""
+    network = TinySocialNetwork("Encode Decode Annotation")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.set_node_annotation(oscar, "Chief Architect")
+    network.set_node_annotation(lisa, "Data Lead")
+
+    state = network.encode_complete_state()
+
+    # Clear annotations and decode to restore
+    network.node_annotations = {}
+    assert network.get_node_annotation(oscar) is None
+
+    network.decode_complete_state(state)
+
+    assert network.node_annotations.get(oscar.name) == "Chief Architect"
+    assert network.node_annotations.get(lisa.name) == "Data Lead"
+
+
+def test_multiple_annotations_independent(setup):
+    """Each agent's annotation should be independent."""
+    network = TinySocialNetwork("Multi Annotations")
+    oscar = create_oscar_the_architect()
+    lisa = create_lisa_the_data_scientist()
+    marcos = create_marcos_the_physician()
+
+    network.add_relation(oscar, lisa, "colleagues")
+    network.add_relation(lisa, marcos, "colleagues")
+
+    network.set_node_annotation(oscar, "Technical Lead")
+    network.set_node_annotation(lisa, "Data Scientist")
+    # marcos has no annotation
+
+    assert network.get_node_annotation(oscar) == "Technical Lead"
+    assert network.get_node_annotation(lisa) == "Data Scientist"
+    assert network.get_node_annotation(marcos) is None
+
+    # Oscar's context should contain his annotation
+    oscar_ctx = oscar._mental_state.get("context", [])
+    assert any("Technical Lead" in str(c) for c in oscar_ctx)
+
+    # Marcos should not have an annotation-related context entry
+    marcos_ctx = marcos._mental_state.get("context", [])
+    assert not any("Your role in this network:" in str(c) for c in marcos_ctx)
