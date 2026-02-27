@@ -1,6 +1,10 @@
 # TinyTroupe 🤠🤓🥸🧐
 [![Core Tests](https://github.com/microsoft/TinyTroupe/actions/workflows/core-tests.yml/badge.svg)](https://github.com/microsoft/TinyTroupe/actions/workflows/core-tests.yml)
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/12206" target="_blank"><img src="https://trendshift.io/api/badge/repositories/12206" alt="Yeah, we are totally fine for not getting to #1, no hard feelings at all." style="width: 250px; height: 55px;" width="250" height="55"/></a>
+</p>
+
 *LLM-powered multiagent persona simulation for imagination enhancement and business insights.*
 
 <p align="center">

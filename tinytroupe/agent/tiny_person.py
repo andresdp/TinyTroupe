@@ -983,6 +983,7 @@ class TinyPerson(JsonSerializableRegistry):
         description: str = None,
         source: AgentOrWorld = None,
         max_content_length=None,
+        describe: bool = True,
     ):
         """
         Perceives a visual stimulus — optionally including actual images — and updates
@@ -994,7 +995,8 @@ class TinyPerson(JsonSerializableRegistry):
         1. Register each image in its internal ``_image_registry`` (assigning short IDs
            such as ``img_1``, ``img_2``, …).
         2. Generate a text description of the images via the vision model (cached by
-           content hash to avoid redundant API calls).
+           content hash to avoid redundant API calls).  **Skipped** when
+           ``describe=False``.
         3. Combine the user-supplied ``description`` and the LLM-generated description
            into the stimulus ``content``.
         4. Include ``image_description`` and ``image_refs`` (mapping IDs to file
@@ -1011,6 +1013,11 @@ class TinyPerson(JsonSerializableRegistry):
             description (str, optional): A textual description of what the agent is looking at.
             source (AgentOrWorld, optional): The source of the visual stimulus.
             max_content_length (int, optional): Maximum content length for display.
+            describe (bool): When ``True`` (default), images are described by
+                the vision LLM.  When ``False``, images are registered and
+                attached to the stimulus (so the main LLM receives them as
+                multimodal input) but the expensive vision description call
+                is skipped.
 
         Returns:
             TinyPerson: ``self``, to allow method chaining.
@@ -1032,7 +1039,11 @@ class TinyPerson(JsonSerializableRegistry):
 
         # ----- vision path -----
         image_ids = self._register_images(image_refs)
-        llm_description = self._describe_images(image_refs, user_context=description)
+        llm_description = (
+            self._describe_images(image_refs, user_context=description)
+            if describe
+            else ""
+        )
 
         # Combine user description + LLM description
         parts = []

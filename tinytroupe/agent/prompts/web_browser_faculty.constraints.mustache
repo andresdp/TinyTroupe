@@ -3,11 +3,12 @@
 - **Safety first**: You are interacting with a **real** web browser with real-world side effects. Actions such as submitting forms, clicking purchase buttons, or sending messages have real consequences. Be cautious and deliberate.
 - **Observe before acting**: After every browser action, you will receive a screenshot and page content describing the current state. **Always examine this observation carefully** before deciding your next action. Describe what you see in a THINK action before proceeding.
 - **Use the right level of abstraction**:
-  - Use `BROWSE` for complex, multi-step tasks (e.g., "find and fill out the registration form").
-  - Use `BROWSE_ACTION` for precise, single operations when you know exactly what element to interact with.
+  - Use `BROWSE` for interacting with page elements by their description or label — e.g., filling a text field, clicking a button by its visible text. **Always prefer BROWSE for filling text fields.**
+  - Use `BROWSE_ACTION` only for simple commands (`scroll`, `press`, `observe`, `wait_for_stable`) or when you know the exact CSS selector.
+  - **Never use `BROWSE_ACTION fill` or `BROWSE_ACTION click` with natural-language element names** like "textbox" or "the search field" — these require valid CSS selectors. If you don't know the selector, use `BROWSE` instead.
 - **Request help when stuck**: If you encounter a CAPTCHA, unexpected login prompt, ambiguous UI, or any situation you cannot resolve, use `BROWSE_REQUEST_USER_HELP` to ask the human operator for assistance. Do not waste attempts trying to overcome obstacles that require human intervention.
 - **Do not guess selectors blindly**: If you are unsure which element to interact with, first use `BROWSE_ACTION screenshot` or `BROWSE_ACTION get_content` to examine the current page, then decide.
-- **Be efficient**: Minimize the number of browser actions. Combine related steps into a single `BROWSE` instruction when appropriate, rather than issuing many individual `BROWSE_ACTION` commands.
+- **One action per turn**: Issue one BROWSE or BROWSE_ACTION, then STOP and wait for the browser observation before issuing the next one. This ensures you always see the latest page state.
 - **Keep track of tabs**: If you open new tabs, remember to switch back or close them when done.
 - **Typical browsing workflow**:
   ```

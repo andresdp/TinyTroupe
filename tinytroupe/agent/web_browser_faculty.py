@@ -76,10 +76,41 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         action_delay_ms: Milliseconds between consecutive low-level actions.
         max_content_length: Truncate extracted page content to this length.
         use_vision: When ``True`` (default), every browser observation
-            includes an LLM vision call to describe the screenshot.
-            When ``False``, the agent still receives the accessibility-tree
-            page content but skips the expensive vision call — roughly
-            halving the time per browsing step.
+            includes the screenshot image.  When ``False``, the agent only
+            receives the accessibility-tree page content.
+        vision_mode: Controls *how* the screenshot is delivered when
+            ``use_vision`` is ``True``:
+
+            * ``"described"`` (default) — the screenshot is sent to a
+              vision LLM for a textual description **and** included as a
+              multimodal image reference.  High-quality observations at
+              the cost of an extra LLM call per step.
+            * ``"raw"`` — the screenshot is included as a multimodal
+              image reference **without** a vision LLM call.  The main
+              agent LLM sees both the raw image and the accessibility-
+              tree text side by side, keeping cost and latency low.
+
+            Ignored when ``use_vision`` is ``False``.
+        display_screenshots: When ``True``, display each browser
+            screenshot inline in the notebook/terminal output as it is
+            captured.  In Jupyter environments the image is rendered
+            inline; in plain terminals the file path is printed instead.
+            Defaults to ``False``.
+        auto_wait_for_stable: When ``True`` (default), the faculty
+            automatically calls ``wait_for_page_stable()`` after every
+            state-changing browser action (click, fill, BROWSE, etc.)
+            before feeding the observation back to the agent.  This
+            ensures the agent always sees the **final, settled** page
+            state rather than intermediate loading spinners or streaming
+            content.  Disable this for pages that never stabilize (e.g.
+            live dashboards with continuous updates).
+        auto_wait_timeout: Maximum seconds to wait for the page to
+            stabilize when ``auto_wait_for_stable`` is ``True``.
+            Defaults to ``180.0`` (3 minutes), which accommodates
+            slow API responses such as LLM-powered chat endpoints.
+            The wait is non-blocking — if the page hasn't stabilized
+            by this timeout the agent still receives the latest
+            snapshot and moves on.
         requires_faculties: Other faculties this one depends on.
     """
 
@@ -108,7 +139,11 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         action_delay_ms: int = 0,
         max_content_length: int | None = None,
         use_vision: bool = True,
+        vision_mode: str = "described",
+        display_screenshots: bool = False,
         cdp_url: str | None = None,
+        auto_wait_for_stable: bool = True,
+        auto_wait_timeout: float = 180.0,
         real_world_side_effect_delay: float = 5.0,
         requires_faculties: list | None = None,
     ):
@@ -144,7 +179,11 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         self._action_delay_ms = action_delay_ms
         self._max_content_length = max_content_length
         self._use_vision = use_vision
+        self._vision_mode = vision_mode
+        self._display_screenshots = display_screenshots
         self._cdp_url = cdp_url
+        self._auto_wait_for_stable = auto_wait_for_stable
+        self._auto_wait_timeout = auto_wait_timeout
 
         # ------- user interaction backend -------
         if user_interaction is None:
@@ -160,6 +199,14 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         # process_observations() knows to feed the updated state to the
         # agent before the next act() call.
         self._browser_state_dirty = False
+
+        # Pending-settle flag: set to True when _auto_settle times out
+        # (the page was still changing when we gave up).  On the next
+        # process_observations() call we re-check: if the page has now
+        # stabilized, we feed a fresh observation so the agent sees the
+        # final loaded state.
+        self._pending_settle = False
+        self._pending_settle_snapshot = ""
 
     # ------------------------------------------------------------------
     # Browser controller lifecycle
@@ -235,22 +282,69 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
     def process_observations(self, agent) -> None:
         """Deliver pending browser state to the agent before the next act().
 
-        When the user (experimenter) manipulates the browser externally via
-        ``user_goto()``, ``user_browse()``, ``user_action()``, etc., the
-        faculty sets an internal dirty flag.  This method checks the flag
-        and, if set, snapshots the current browser state and feeds it to
-        the agent via ``_feed_observation()``, so the agent sees the
-        updated page in its next LLM turn.
+        Handles two cases:
 
-        This hook is called automatically by ``TinyPerson.act()`` before
-        each turn — no manual ``_feed_observation()`` calls are needed.
+        1. **User-dirty flag** — the user (experimenter) manipulated the
+           browser externally and we need to feed the new state.
+        2. **Pending-settle flag** — a previous ``_auto_settle`` timed out
+           while the page was still loading.  We re-check here: if the
+           page has now stabilized (content differs from the timeout
+           snapshot), we feed a fresh observation so the agent sees the
+           final loaded state.  This is printed with Rich output so the
+           user knows the deferred check happened.
         """
-        if not self._browser_state_dirty:
-            return
-
         ctrl = self._get_browser_controller()
         if not ctrl.is_alive():
             self._browser_state_dirty = False
+            self._pending_settle = False
+            return
+
+        # ── Deferred settle re-check ─────────────────────────────────
+        if self._pending_settle:
+            from rich.console import Console
+            _console = Console()
+
+            try:
+                # Use get_page_content() instead of _quick_snapshot()
+                # because it's thread-dispatched and won't cause
+                # greenlet threading errors in Jupyter.
+                current_snapshot = ctrl.get_page_content() or ""
+            except Exception:
+                current_snapshot = ""
+
+            if current_snapshot and current_snapshot != self._pending_settle_snapshot:
+                # Page changed since the timeout — it likely finished
+                # loading.  Feed the fresh state.
+                _console.print(
+                    "  :arrows_counterclockwise: "
+                    "[bold bright_cyan]Page updated since last timeout "
+                    "\u2014 feeding fresh observation to agent[/]"
+                )
+                try:
+                    self._feed_observation(
+                        agent,
+                        "Page finished loading (deferred settle check)",
+                        {
+                            "screenshot": ctrl.screenshot(),
+                            "page_content": ctrl.get_page_content(),
+                            "metadata": ctrl.get_page_metadata(),
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(f"Deferred settle observation failed: {exc}")
+                self._pending_settle = False
+                self._pending_settle_snapshot = ""
+            else:
+                _console.print(
+                    "  :hourglass_flowing_sand: "
+                    "[dim]Page still unchanged since timeout "
+                    "\u2014 agent proceeds with latest state[/]"
+                )
+                self._pending_settle = False
+                self._pending_settle_snapshot = ""
+
+        # ── User-dirty flag ──────────────────────────────────────────
+        if not self._browser_state_dirty:
             return
 
         try:
@@ -310,10 +404,27 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
             ctrl.goto(target_url)
 
         result = ctrl.execute_nl_command(content)
+
+        # Auto-wait: after a BROWSE action the page may be loading
+        # dynamic content (e.g. API responses, streaming chat).  Wait
+        # for the page to stabilize so the agent sees the final state,
+        # not an intermediate "loading..." spinner.
+        if self._auto_wait_for_stable:
+            self._auto_settle(ctrl, result)
+
         self._feed_observation(agent, f"BROWSE: {content}", result)
         return True
 
     # ----- BROWSE_ACTION (low-level) -----
+
+    # Commands that modify the page state and should trigger auto-wait.
+    # Note: "goto" is excluded because navigation already waits for the
+    # page load via BrowserController.goto(); adding auto_settle on top
+    # would cause long timeouts on SSO redirects and other multi-step
+    # navigation flows.
+    _STATE_CHANGING_COMMANDS = frozenset({
+        "click", "fill", "select", "press", "submit",
+    })
 
     def _handle_browse_action(self, agent, action: dict) -> bool:
         """Handle a low-level ``BROWSE_ACTION`` action."""
@@ -322,6 +433,14 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
 
         raw = (action.get("content", "") or "").strip()
         result = self._dispatch_low_level(ctrl, raw)
+
+        # Auto-wait after state-changing commands so the agent sees the
+        # settled page, not a loading state.  Skip for read-only commands
+        # (screenshot, scroll, get_content) and for wait_for_stable itself.
+        cmd = raw.split(maxsplit=1)[0].lower() if raw else ""
+        if self._auto_wait_for_stable and cmd in self._STATE_CHANGING_COMMANDS:
+            self._auto_settle(ctrl, result)
+
         self._feed_observation(agent, f"BROWSE_ACTION: {raw}", result)
         return True
 
@@ -382,6 +501,17 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
             return ctrl.wait_for(arg)
         elif cmd == "wait_for_stable":
             return ctrl.wait_for_page_stable()
+        elif cmd == "observe":
+            # Take a fresh snapshot of the page (screenshot + content)
+            # without performing any action.  Useful for the agent to
+            # actively check the current page state after waiting or
+            # to recover from stale observations.
+            return {
+                "success": True,
+                "screenshot": ctrl.screenshot(),
+                "page_content": ctrl.get_page_content(),
+                "metadata": ctrl.get_page_metadata(),
+            }
         elif cmd == "upload_file":
             m = re.match(r"(\S+)\s+(.*)", arg)
             if m:
@@ -411,6 +541,88 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         return True
 
     # ------------------------------------------------------------------
+    # Auto-wait for page stability
+    # ------------------------------------------------------------------
+
+    def _auto_settle(self, ctrl, result: dict) -> None:
+        """Wait for the page to stop changing after a state-changing action.
+
+        Uses the **adaptive timeout** in ``wait_for_page_stable()``: starts
+        with a short 8 s budget and automatically extends while the page
+        is actively changing (up to ``auto_wait_timeout``).  Simple UI
+        clicks settle in one poll cycle (~2 s); heavy API calls extend as
+        needed.
+
+        Progress is reported to the simulation trajectory using Rich-
+        styled output so the user can see exactly what's happening.
+
+        Inspired by the psychological concept of *perceptual constancy*:
+        humans naturally wait for a scene to settle before interpreting it.
+        We give the agent the same courtesy.
+        """
+        from rich.console import Console
+        _console = Console()
+
+        _console.print(
+            "  :hourglass_flowing_sand: [dim bright_cyan]Waiting for page to settle…[/]"
+        )
+
+        last_reported = [0.0]  # mutable for closure
+
+        def _on_poll(elapsed, changed, content_len):
+            """Callback from wait_for_page_stable — print progress."""
+            # Only print updates when the page is still changing and
+            # at least 5 s have passed since the last report (to avoid
+            # flooding the output).
+            if changed and elapsed - last_reported[0] >= 5.0:
+                _console.print(
+                    f"    :arrows_counterclockwise: "
+                    f"[dim yellow]Page still changing[/] "
+                    f"[dim]({elapsed}s elapsed, {content_len:,} chars)[/]"
+                )
+                last_reported[0] = elapsed
+
+        try:
+            settle_result = ctrl.wait_for_page_stable(
+                timeout=self._auto_wait_timeout,
+                poll_interval=2.0,
+                initial_timeout=8.0,
+                on_poll=_on_poll,
+            )
+        except Exception as exc:
+            logger.debug(f"auto_settle: wait_for_page_stable failed: {exc}")
+            settle_result = {"success": False, "elapsed": 0}
+
+        elapsed = settle_result.get("elapsed", "?")
+        if settle_result.get("success"):
+            _console.print(
+                f"    :white_check_mark: "
+                f"[green]Page settled[/] [dim]({elapsed}s)[/]"
+            )
+            self._pending_settle = False
+        else:
+            _console.print(
+                f"    :warning: "
+                f"[yellow]Settle timeout[/] [dim]({elapsed}s \u2014 "
+                f"proceeding with current state, will re-check next turn)[/]"
+            )
+            # Mark for deferred re-check on next process_observations()
+            self._pending_settle = True
+            try:
+                self._pending_settle_snapshot = ctrl.get_page_content() or ""
+            except Exception:
+                self._pending_settle_snapshot = ""
+
+        # Refresh the result with the settled page state so
+        # _feed_observation picks up the final screenshot + content.
+        try:
+            result["screenshot"] = ctrl.screenshot()
+            result["page_content"] = ctrl.get_page_content()
+            result["metadata"] = ctrl.get_page_metadata()
+        except Exception as exc:
+            logger.debug(f"auto_settle: could not refresh result: {exc}")
+
+    # ------------------------------------------------------------------
     # Observation feedback
     # ------------------------------------------------------------------
 
@@ -430,18 +642,27 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
             screenshot_path = ctrl.screenshot()
 
         if screenshot_path:
+            # Optionally display the screenshot inline (Jupyter) or print
+            # the file path (terminal) so the operator can follow along.
+            if self._display_screenshots:
+                self._display_screenshot(screenshot_path)
+
             if self._use_vision:
-                # Full vision path: LLM describes the screenshot image.
-                # Produces high-quality visual observations but costs an
-                # extra LLM call (~5-15 s) per action.
+                describe = self._vision_mode != "raw"
+                # When vision_mode="described": LLM describes the screenshot
+                # image (extra LLM call, higher quality observations).
+                # When vision_mode="raw": the screenshot is attached as a
+                # multimodal image reference without an LLM vision call —
+                # the main agent LLM sees the raw image alongside the
+                # accessibility-tree text.
                 agent.see(
                     images=[screenshot_path],
                     description=f"Current browser state after: {action_summary}",
+                    describe=describe,
                 )
             else:
-                # Fast path: skip the LLM vision call.  The agent still
-                # receives the accessibility-tree page content below,
-                # which is sufficient for most browsing tasks.
+                # Vision off: skip the screenshot entirely.  The agent
+                # still receives the accessibility-tree page content below.
                 agent.see(
                     description=f"Current browser state after: {action_summary}",
                 )
@@ -487,6 +708,16 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
                 "source": "",
             }
         )
+
+    @staticmethod
+    def _display_screenshot(path: str) -> None:
+        """Display a screenshot inline in Jupyter, or print the path in a terminal."""
+        try:
+            from IPython.display import display, Image as IPImage
+            display(IPImage(filename=path, width=600))
+        except (ImportError, Exception):
+            # Not in Jupyter or display failed — print the path instead.
+            logger.info(f"\U0001F4F7 Screenshot: {path}")
 
     # ------------------------------------------------------------------
     # User-facing methods (bypass agent cognition)

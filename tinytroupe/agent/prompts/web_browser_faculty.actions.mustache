@@ -2,25 +2,33 @@
 
 You have access to a **real web browser** and can interact with live web pages. You have two levels of browser interaction:
 
-### High-level browsing (BROWSE)
+### High-level browsing (BROWSE) — recommended for most interactions
 
-Use `BROWSE` when you want to accomplish a multi-step web task described in natural language.
-The system will automatically decompose your instruction into individual browser operations.
+Use `BROWSE` when you want to interact with the page using **natural language**. The system will automatically find the right elements and perform the action. **This is the recommended approach for filling text fields, clicking buttons by their label, and any interaction where you describe what you want in words.**
 
 - **type**: `BROWSE`
-- **content**: A natural-language description of what you want to accomplish on the web page.
+- **content**: A natural-language description of **one specific thing** to do on the page.
 - **target**: (optional) A URL to navigate to before executing the instruction. If omitted, the action operates on the current page.
 
-**Examples:**
+**IMPORTANT:** Each BROWSE should describe **one task at a time**. Do NOT chain unrelated actions in a single BROWSE.
+
+**When to use BROWSE:**
+- Filling a text field: "Enter 'my search query' in the textbox labeled 'Search...'"
+- Clicking a button by its label: "Click the 'Send' button"
+- Any interaction where you describe the element in words rather than CSS selectors
+
+**Good examples:**
 ```
-{"type": "BROWSE", "content": "Navigate to https://example.com and find the contact information", "target": "https://example.com"}
 {"type": "BROWSE", "content": "Fill in the search box with 'TinyTroupe' and press Enter", "target": ""}
-{"type": "BROWSE", "content": "Find the login form, enter the username 'alice' and password 'secret', then click Sign In", "target": ""}
+{"type": "BROWSE", "content": "Click the 'Sign In' button", "target": ""}
+{"type": "BROWSE", "content": "Enter 'alice@example.com' in the email field", "target": ""}
 ```
 
-### Low-level browser actions (BROWSE_ACTION)
+### Low-level browser actions (BROWSE_ACTION) — for precise control only
 
-Use `BROWSE_ACTION` when you need precise, atomic control over the browser. The content field contains the action name followed by its parameters.
+Use `BROWSE_ACTION` **only** when you need precise atomic control and you know the exact **CSS selector** for the element. The `click`, `fill`, and `select` commands require valid CSS selectors (e.g., `button:has-text('Submit')`, `input[name=email]`, `role=textbox[name="..."]`) — **NOT** natural-language descriptions like "textbox" or "the search field".
+
+**⚠️ If you don't know the exact CSS selector, use BROWSE instead — it handles element discovery for you.**
 
 - **type**: `BROWSE_ACTION`
 - **content**: `<action_name> <parameters>`
@@ -31,30 +39,36 @@ Use `BROWSE_ACTION` when you need precise, atomic control over the browser. The 
 | Action | Format | Description |
 |--------|--------|-------------|
 | `goto` | `goto <url>` | Navigate to a URL |
-| `click` | `click <selector>` | Click an element |
-| `fill` | `fill <selector> <text>` | Fill an input field |
-| `select` | `select <selector> <value>` | Select a dropdown option |
+| `click` | `click <css_selector>` | Click an element matching a CSS selector |
+| `fill` | `fill <css_selector> <text>` | Fill an input matching a CSS selector. ⚠️ Requires a valid CSS selector like `input[name=email]`, NOT a word like "textbox" |
+| `select` | `select <css_selector> <value>` | Select a dropdown option |
 | `press` | `press <key>` | Press a keyboard key (Enter, Tab, Escape, etc.) |
 | `scroll` | `scroll <up\|down> [amount]` | Scroll the page (default: 300px) |
-| `hover` | `hover <selector>` | Hover over an element |
+| `hover` | `hover <css_selector>` | Hover over an element |
 | `screenshot` | `screenshot` | Capture the current page state |
 | `get_content` | `get_content` | Retrieve the current page content |
+| `observe` | `observe` | Take a fresh screenshot and re-read the current page content without performing any action. Use this to check what the page looks like right now, or if the last observation seems stale |
+| `wait_for_stable` | `wait_for_stable` | Wait until the page content stops changing (useful for streaming responses, loading states) |
 | `new_tab` | `new_tab [url]` | Open a new browser tab |
 | `switch_tab` | `switch_tab <index>` | Switch to a specific tab |
 | `close_tab` | `close_tab [index]` | Close a tab |
 | `back` | `back` | Navigate back |
 | `forward` | `forward` | Navigate forward |
 | `reload` | `reload` | Reload the current page |
-| `wait_for_stable` | `wait_for_stable` | Wait until the page content stops changing — useful when a web page is streaming a response (e.g., an AI chat reply, a search loading results, a form submission processing) and you need the final, complete output before reading it |
+
+**When to use BROWSE_ACTION:**
+- Simple commands that don't need a selector: `scroll down 500`, `press Enter`, `observe`, `wait_for_stable`
+- Clicking elements with known selectors: `click text=Submit`, `click listitem:has-text('<unset query>')`
+- **NOT for filling text fields** unless you know the exact CSS selector — use BROWSE instead
 
 **Examples:**
 ```
-{"type": "BROWSE_ACTION", "content": "goto https://example.com", "target": ""}
-{"type": "BROWSE_ACTION", "content": "click button:has-text('Submit')", "target": ""}
-{"type": "BROWSE_ACTION", "content": "fill input[name=email] alice@example.com", "target": ""}
-{"type": "BROWSE_ACTION", "content": "press Enter", "target": ""}
+{"type": "BROWSE_ACTION", "content": "click listitem:has-text('<unset query>')", "target": ""}
+{"type": "BROWSE_ACTION", "content": "click text=Send", "target": ""}
+{"type": "BROWSE_ACTION", "content": "click text=Submit", "target": ""}
 {"type": "BROWSE_ACTION", "content": "scroll down 500", "target": ""}
-{"type": "BROWSE_ACTION", "content": "screenshot", "target": ""}
+{"type": "BROWSE_ACTION", "content": "press Enter", "target": ""}
+{"type": "BROWSE_ACTION", "content": "observe", "target": ""}
 {"type": "BROWSE_ACTION", "content": "wait_for_stable", "target": ""}
 ```
 

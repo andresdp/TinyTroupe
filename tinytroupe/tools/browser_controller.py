@@ -110,7 +110,7 @@ class BrowserController:
         "switch_to_frame", "switch_to_main_frame",
         "get_page_content", "get_accessibility_tree", "get_cleaned_html",
         "get_visible_text", "get_page_metadata",
-        "screenshot",
+        "screenshot", "_quick_snapshot",
         "pause_for_login", "inject_credentials",
         "save_storage_state", "load_storage_state",
         "execute_nl_command",
@@ -266,6 +266,7 @@ class BrowserController:
             # installed extensions and conditional-access compliance).
             self._browser = self._playwright.chromium.connect_over_cdp(
                 self._cdp_url,
+                timeout=60_000,  # 60s — generous for slow Edge+SSO startups
             )
             self._context = self._browser.contexts[0]
             self._apply_stealth()
@@ -543,11 +544,9 @@ class BrowserController:
         Return a list of candidate selectors to try, starting with the
         original and including common LLM-generated variations.
 
-        LLMs frequently produce invalid pseudo-element selectors such as
-        ``link:has-text('...')`` (``link`` is not an HTML element) or
-        ``button:has-text('...')`` when the element is actually an ``<a>``.
-        This helper generates sensible fallbacks so clicks succeed on the
-        first attempt more often.
+        LLMs frequently produce invalid or overly specific selectors.
+        This helper generates sensible fallbacks so clicks succeed on
+        the first attempt more often.
         """
         import re as _re
 
@@ -561,9 +560,35 @@ class BrowserController:
         m = _re.search(r"""has-text\(\s*['"](.+?)['"]\s*\)""", selector)
         if m:
             text = m.group(1)
-            # Try as Playwright text selector (matches <a>, <button>, etc.)
             candidates.append(f"a:has-text('{text}')")
             candidates.append(f"text='{text}'")
+            candidates.append(f"text={text}")
+
+            # Strip leading number prefixes like "8. " or "12. " that
+            # the LLM often copies from the visual list numbering but
+            # which may not be part of the element's accessible text.
+            stripped = _re.sub(r"^\d+\.\s*", "", text)
+            if stripped != text:
+                tag_prefix = selector.split(":has-text(")[0] if ":has-text(" in selector else ""
+                if tag_prefix:
+                    candidates.append(f"{tag_prefix}:has-text('{stripped}')")
+                candidates.append(f"text='{stripped}'")
+                candidates.append(f"text={stripped}")
+
+        # nth-of-type / nth-child are fragile — if the selector also
+        # contains a tag name, try a generic :nth-child variant and
+        # also try without the positional pseudo-class.
+        if ":nth-of-type(" in selector or ":nth-child(" in selector:
+            base = _re.sub(r":nth-(of-type|child)\(\d+\)", "", selector).strip()
+            if base:
+                candidates.append(base)  # try without positional
+
+        # If the selector is a bare tag:nth-of-type (e.g. listitem:nth-of-type(6)),
+        # try the Playwright :nth-match pseudo-class and text= approaches.
+        m_nth = _re.match(r"(\w+):nth-(?:of-type|child)\((\d+)\)", selector)
+        if m_nth:
+            tag, idx = m_nth.group(1), m_nth.group(2)
+            candidates.append(f":nth-match({tag}, {idx})")
 
         # Deduplicate while preserving order
         seen: set[str] = set()
@@ -610,12 +635,47 @@ class BrowserController:
         return {"success": False, "error": last_error}
 
     def fill(self, selector: str, text: str) -> dict:
-        """Clear and fill an input element with ``text``."""
+        """Clear and fill an input element with ``text``.
+
+        Uses keyboard typing as the **primary** strategy: click to focus,
+        Ctrl+A to select existing content, then ``keyboard.type()`` which
+        fires real ``keydown``/``keypress``/``input``/``keyup`` events.
+        This is critical for React/SPA controlled inputs — Playwright's
+        native ``page.fill()`` sets the DOM value directly, but React
+        immediately overwrites it from its internal state on the next
+        render cycle, so the value silently disappears.  Keyboard events,
+        on the other hand, travel through React's synthetic event system
+        and correctly update the component state.
+
+        Falls back to ``page.fill()`` only if the keyboard approach fails
+        (e.g. because the selector doesn't match a clickable element).
+        """
         self.ensure_launched()
+
+        # ── Primary: keyboard approach (React-compatible) ────────────
+        try:
+            logger.debug(f"fill: keyboard approach — clicking '{selector}'")
+            self._page.click(selector, timeout=5_000)
+            time.sleep(0.3)  # let React process focus events / re-render
+            self._page.keyboard.press("Control+a")
+            time.sleep(0.1)
+            logger.debug(f"fill: typing {len(text)} chars into '{selector}'")
+            self._page.keyboard.type(text, delay=15)
+            self._delay()
+            self._log_action("fill", {"selector": selector, "text": text}, True)
+            return {"success": True}
+        except Exception as kbd_exc:
+            logger.debug(
+                f"fill: keyboard approach failed for '{selector}': {kbd_exc}. "
+                "Trying page.fill() fallback."
+            )
+
+        # ── Fallback: Playwright native fill ─────────────────────────
         try:
             self._page.fill(selector, text, timeout=10_000)
             self._delay()
-            self._log_action("fill", {"selector": selector, "text": text}, True)
+            self._log_action("fill", {"selector": selector, "text": text}, True,
+                             "used page.fill() fallback")
             return {"success": True}
         except Exception as exc:
             self._log_action("fill", {"selector": selector, "text": text}, False, str(exc))
@@ -690,84 +750,149 @@ class BrowserController:
 
     def wait_for_page_stable(
         self,
-        timeout: int = 90,
-        poll_interval: float = 3.0,
-        stable_checks: int = 3,
-        initial_delay: float = 5.0,
+        timeout: float = 120.0,
+        poll_interval: float = 2.0,
+        initial_timeout: float = 8.0,
+        minimum_settle_time: float = 4.0,
+        stable_checks: int = 2,
+        on_poll=None,
     ) -> dict:
-        """Wait until the page content stops changing.
+        """Wait until the page content stops changing, with adaptive timeout.
 
-        Useful when a page is streaming content (e.g., an LLM chat response,
-        a live feed, a progress indicator) and you need to wait until the
-        output is complete before reading it.
+        Uses an **adaptive timeout** strategy instead of a fixed budget:
 
-        The method works by polling ``get_page_content()`` and checking
-        whether its length has stabilized — i.e., remained the same for
-        ``stable_checks`` consecutive polls.
+        * Waits at least ``minimum_settle_time`` seconds before declaring
+          the page stable, giving async operations time to start their
+          DOM updates.
+        * Requires ``stable_checks`` consecutive identical snapshots
+          (default 2) before declaring stable.
+        * If the page **changed** since the last poll, the soft deadline
+          is extended by ``2 × poll_interval`` — the page is clearly
+          still loading, so we keep waiting.
+        * Never exceeds the hard ``timeout`` cap.
+
+        This means a sidebar click that settles in ~1 s finishes after
+        the minimum settle time + 2 stable polls (~8 s).  A "Send" that
+        triggers a 60 s API call extends automatically and finishes as
+        soon as the response stabilises.
 
         Args:
-            timeout: Maximum seconds to wait before giving up.
-            poll_interval: Seconds between content-length polls.
-            stable_checks: Number of consecutive identical-length polls
-                required to declare the page stable.
-            initial_delay: Seconds to wait before the first poll, giving
-                the page time to start its dynamic update.
+            timeout: Hard upper-bound in seconds (never exceeded).
+            poll_interval: Seconds between text-snapshot polls.
+            initial_timeout: Starting soft-deadline budget in seconds.
+                Extended automatically while the page is actively
+                changing.
+            minimum_settle_time: Seconds to wait before the page can be
+                declared stable.  Prevents premature "settled" when an
+                async API call hasn't started updating the DOM yet.
+            stable_checks: Number of consecutive identical snapshots
+                required to declare the page stable (default 2).
+            on_poll: Optional callback ``f(elapsed, changed, snapshot_len)``
+                called after each poll for progress reporting.
 
         Returns:
-            Result dict with ``success``, ``elapsed`` (seconds), and
+            Result dict with ``success``, ``elapsed``, and
             ``content_length``.
         """
-        import time as _time
-
         self.ensure_launched()
-        start = _time.time()
 
-        if initial_delay > 0:
-            _time.sleep(initial_delay)
+        # Suppress noisy greenlet threading errors from Playwright's sync
+        # API callbacks in Jupyter.  These are non-fatal (stale callbacks
+        # firing on the wrong thread) but clutter the output.
+        import logging as _logging
+        _asyncio_logger = _logging.getLogger("asyncio")
+        _prev_level = _asyncio_logger.level
+        _asyncio_logger.setLevel(_logging.CRITICAL)
 
-        prev_len = 0
-        stable_count = 0
-        max_polls = int(timeout / poll_interval) if poll_interval > 0 else 1
+        start = time.time()
+        hard_deadline = start + timeout
+        soft_deadline = start + initial_timeout
+        min_settle_deadline = start + minimum_settle_time
 
-        for _ in range(max_polls):
-            try:
-                content = self.get_page_content()
-                curr_len = len(content) if content else 0
-            except Exception:
-                curr_len = 0
+        prev_snapshot = self._quick_snapshot()
+        prev_len = len(prev_snapshot)
+        consecutive_stable = 0
 
-            if curr_len == prev_len and prev_len > 0:
-                stable_count += 1
-                if stable_count >= stable_checks:
-                    elapsed = _time.time() - start
+        while True:
+            time.sleep(poll_interval)
+            now = time.time()
+            elapsed = round(now - start, 1)
+
+            curr_snapshot = self._quick_snapshot()
+            curr_len = len(curr_snapshot)
+            page_changed = (curr_snapshot != prev_snapshot)
+
+            # Report progress if a callback is provided.
+            if on_poll:
+                try:
+                    on_poll(elapsed, page_changed, curr_len)
+                except Exception:
+                    pass
+
+            if not page_changed and prev_len > 0:
+                consecutive_stable += 1
+                # Only declare stable if we've passed the minimum settle
+                # time AND seen enough consecutive identical snapshots.
+                if (consecutive_stable >= stable_checks
+                        and now >= min_settle_deadline):
                     self._log_action(
                         "wait_for_page_stable",
-                        {"elapsed": round(elapsed, 1), "content_length": curr_len},
+                        {"elapsed": elapsed, "content_length": curr_len,
+                         "adaptive": True},
                         True,
                     )
+                    _asyncio_logger.setLevel(_prev_level)
                     return {
                         "success": True,
-                        "elapsed": round(elapsed, 1),
+                        "elapsed": elapsed,
                         "content_length": curr_len,
                     }
             else:
-                stable_count = 0
-            prev_len = curr_len
-            _time.sleep(poll_interval)
+                consecutive_stable = 0
 
-        elapsed = _time.time() - start
-        self._log_action(
-            "wait_for_page_stable",
-            {"elapsed": round(elapsed, 1), "content_length": prev_len},
-            False,
-            "timeout",
-        )
-        return {
-            "success": False,
-            "elapsed": round(elapsed, 1),
-            "content_length": prev_len,
-            "error": f"Page did not stabilize within {timeout}s",
-        }
+            # Page is still changing — extend the soft deadline
+            # (but never past the hard cap).
+            if page_changed:
+                soft_deadline = min(
+                    now + poll_interval * 2, hard_deadline
+                )
+
+            prev_snapshot = curr_snapshot
+            prev_len = curr_len
+
+            # Check deadlines.
+            if now >= hard_deadline or now >= soft_deadline:
+                self._log_action(
+                    "wait_for_page_stable",
+                    {"elapsed": elapsed, "content_length": curr_len,
+                     "adaptive": True},
+                    False,
+                    "adaptive timeout",
+                )
+                _asyncio_logger.setLevel(_prev_level)
+                return {
+                    "success": False,
+                    "elapsed": elapsed,
+                    "content_length": curr_len,
+                    "error": f"Page did not stabilize within {elapsed}s",
+                }
+
+    def _quick_snapshot(self) -> str:
+        """Return a fast text fingerprint of the current page state.
+
+        Uses ``document.body.innerText`` (visible text only) rather than
+        the full accessibility tree or cleaned HTML, for speed (~5 ms
+        vs ~200 ms).  This makes polling cheap enough for 2 s intervals.
+
+        Suppresses greenlet threading errors that can occur in Jupyter
+        when Playwright's sync API callbacks fire on the wrong thread.
+        """
+        try:
+            if self._page.is_closed():
+                return ""
+            return self._page.evaluate("() => document.body.innerText") or ""
+        except Exception:
+            return ""
 
     def hover(self, selector: str) -> dict:
         """Hover over an element."""
@@ -1183,15 +1308,30 @@ class BrowserController:
         page_content = self.get_page_content()
         metadata = self.get_page_metadata()
 
+        # Take a screenshot so the sub-LLM can see the page visually.
+        # This helps it identify the correct elements, especially when
+        # the accessibility tree is ambiguous or truncated.
+        screenshot_path = self.screenshot()
+
         # Build the prompt for the sub-LLM
         prompt = self._build_nl_decomposition_prompt(command, page_content, metadata)
 
-        # Call the LLM
+        # Call the LLM — use multimodal content if we have a screenshot
         from tinytroupe.clients import client as get_client
+
+        if screenshot_path:
+            from tinytroupe.utils.media import build_multimodal_content_array
+            user_content = build_multimodal_content_array(
+                text=prompt["user"],
+                image_refs=[screenshot_path],
+                detail="auto",
+            )
+        else:
+            user_content = prompt["user"]
 
         messages = [
             {"role": "system", "content": prompt["system"]},
-            {"role": "user", "content": prompt["user"]},
+            {"role": "user", "content": user_content},
         ]
 
         try:
@@ -1211,12 +1351,56 @@ class BrowserController:
 
         # Execute each action sequentially
         results = []
-        for action in actions:
+        from rich.console import Console
+        _console = Console()
+        _console.print(
+            f"  :globe_with_meridians: [bold bright_cyan]NL decomposition[/] → "
+            f"[bright_cyan]{len(actions)} action(s)[/]"
+        )
+        for idx, a in enumerate(actions):
+            action_name = a.get('action', '?')
+            selector = a.get('selector', a.get('url', a.get('key', '')))
+            text_val = a.get('text', '')
+            detail = f" [dim]{selector}[/]" if selector else ""
+            if text_val:
+                detail += f" [dim italic]'{text_val[:60]}{'…' if len(text_val) > 60 else ''}'[/]"
+            _console.print(
+                f"    [bright_cyan][{idx+1}/{len(actions)}][/] "
+                f"[bold]{action_name}[/]{detail}"
+            )
+        for i, action in enumerate(actions):
+            action_name = action.get('action', '?')
+            _console.print(
+                f"  :arrow_forward: [bold]Executing[/] [{i+1}/{len(actions)}] "
+                f"[bold bright_cyan]{action_name}[/] …"
+            )
             result = self._execute_parsed_action(action)
             results.append({"action": action, "result": result})
             if not result.get("success", False):
-                # Stop on first failure — let the agent reason about it.
+                action_name_lower = action.get("action", "").lower()
+                # wait_for / wait_for_stable failures are non-blocking:
+                # the element might already exist or the page might
+                # already be stable.  Continue with the next action.
+                if action_name_lower in ("wait_for", "wait_for_stable"):
+                    _console.print(
+                        f"    [dim yellow]:hourglass: wait timed out (non-blocking), continuing[/]"
+                    )
+                    continue
+                # All other failures stop the sequence.
+                error_msg = result.get('error', '(no error)')
+                _console.print(
+                    f"    [bold red]:cross_mark: FAILED:[/] [red]{error_msg}[/]"
+                )
                 break
+            else:
+                _console.print(
+                    f"    [green]:white_check_mark: success[/]"
+                )
+            # Brief pause between sub-actions for React microtask flush.
+            # The real waiting happens in _auto_settle after the full
+            # NL command completes.
+            if i < len(actions) - 1:
+                time.sleep(0.5)
 
         # Final observation
         screenshot_path = self.screenshot()
@@ -1237,8 +1421,14 @@ class BrowserController:
         """Build the system+user prompt for NL→actions decomposition."""
         system = (
             "You are a browser automation assistant. Given a natural-language "
-            "instruction and the current state of a web page, produce a JSON "
-            "array of low-level browser actions to accomplish the instruction.\n\n"
+            "instruction, a screenshot of the current page, and a structured "
+            "accessibility tree of the page content, produce a JSON array of "
+            "low-level browser actions to accomplish the instruction.\n\n"
+            "You receive BOTH an image of the page (so you can see the visual "
+            "layout, colors, and positions) AND the accessibility tree text "
+            "(so you can identify the correct CSS selectors for elements). "
+            "Use them together: the image clarifies WHAT the user wants, "
+            "the accessibility tree tells you HOW to target it.\n\n"
             "## Available actions\n"
             "Each action is a JSON object with an `action` field and relevant parameters:\n"
             '- `{"action": "goto", "url": "..."}` — navigate to a URL\n'
@@ -1248,14 +1438,22 @@ class BrowserController:
             '- `{"action": "press", "key": "..."}` — press a key (Enter, Tab, Escape, etc.)\n'
             '- `{"action": "scroll", "direction": "up|down", "amount": 300}` — scroll\n'
             '- `{"action": "hover", "selector": "..."}` — hover over an element\n'
-            '- `{"action": "wait_for", "selector": "..."}` — wait for an element to appear\n\n'
+            '- `{"action": "wait_for", "selector": "..."}` — wait for an element to appear\n'
+            '- `{"action": "wait_for_stable"}` — wait for the page to stop changing (use after triggering async loads)\n\n'
             "## Rules\n"
             "- Output ONLY a JSON array of action objects, no other text.\n"
-            "- Use CSS selectors for targeting elements.\n"
-            "- When the accessibility tree lists interactive elements with indices like [N], "
-            "you can use selectors that would match those elements.\n"
-            "- Prefer using text-based selectors like `text=...` or `role=...` when CSS is ambiguous.\n"
+            "- For click actions, ALWAYS prefer `text=` selectors (e.g. `text=Send`, "
+            "`text=<unset query>`) or `has-text()` selectors (e.g. `listitem:has-text('<unset query>')`) "
+            "over positional selectors like nth-of-type or nth-child, which are fragile.\n"
+            "- When using `has-text()`, do NOT include list-item number prefixes like '8. ' — "
+            "use only the actual text content (e.g. `has-text('<unset query>')` not `has-text('8. <unset query>')`).\n"
+            "- For fill actions, prefer `role=` selectors (e.g. `role=textbox[name=\"...\"]`) "
+            "because they reliably match accessibility tree names, including placeholder text.\n"
+            "- NEVER use positional selectors like `:nth-of-type()` or `:nth-child()` — "
+            "they break when the page layout changes. Use text content to identify elements.\n"
+            "- Do NOT add `wait_for` actions unless the instruction explicitly asks to wait.\n"
             "- Keep the action list as short as possible.\n"
+            "- Do NOT duplicate or retry actions. Produce each action exactly once.\n"
             "- If the instruction cannot be accomplished with the current page state, "
             'return `[{"action": "error", "message": "..."}]`.\n'
         )
@@ -1321,6 +1519,7 @@ class BrowserController:
             "press": lambda: self.press(action_dict.get("key", "")),
             "scroll": lambda: self.scroll(action_dict.get("direction", "down"), action_dict.get("amount", 300)),
             "hover": lambda: self.hover(action_dict.get("selector", "")),
+            "wait_for_stable": lambda: self.wait_for_page_stable(),
             "wait_for": lambda: self.wait_for(action_dict.get("selector", "")),
             "upload_file": lambda: self.upload_file(action_dict.get("selector", ""), action_dict.get("path", "")),
             "error": lambda: {"success": False, "error": action_dict.get("message", "Unknown error from LLM")},
