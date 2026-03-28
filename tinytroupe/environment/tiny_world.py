@@ -42,6 +42,7 @@ class TinyWorld:
         interventions=[],
         broadcast_if_no_target=True,
         max_additional_targets_to_display=3,
+        allow_early_stop_via_task_over=False,
     ):
         """
         Initializes an environment.
@@ -55,6 +56,9 @@ class TinyWorld:
             broadcast_if_no_target (bool): If True, broadcast actions if the target of an action is not found.
             max_additional_targets_to_display (int): The maximum number of additional targets to display in a communication. If None,
                 all additional targets are displayed.
+            allow_early_stop_via_task_over (bool): If True, agents can issue TASK_OVER to signal task completion.
+                When all agents have signaled TASK_OVER, remaining simulation steps are skipped.
+                Resets at the start of each ``run()`` call, allowing sequential multi-task execution.
         """
 
         if name is not None:
@@ -88,6 +92,10 @@ class TinyWorld:
 
         # Track simulation steps for cost statistics
         self._simulation_steps = 0
+
+        # TASK_OVER early-stop support
+        self._allow_early_stop_via_task_over = allow_early_stop_via_task_over
+        self._task_over_agents = set()
 
         # add the environment to the list of all environments
         TinyWorld.add_environment(self)
@@ -157,6 +165,9 @@ class TinyWorld:
         # agents can act
         agents_actions = {}
         for agent in reordered_agents:
+            if agent.name in self._task_over_agents:
+                logger.debug(f"[{self.name}] Skipping agent {agent.name} (TASK_OVER).")
+                continue
             logger.debug(f"[{self.name}] Agent {name_or_empty(agent)} is acting.")
             actions = agent.act(return_actions=True)
             agents_actions[agent.name] = actions
@@ -171,10 +182,11 @@ class TinyWorld:
         """
 
         logger.debug(f"[{self.name}] All agents will START acting in parallel.")
+        active_agents = [a for a in self.agents if a.name not in self._task_over_agents]
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = {
                 executor.submit(agent.act, return_actions=True): agent
-                for agent in self.agents
+                for agent in active_agents
             }
             agents_actions = {}
 
@@ -235,6 +247,12 @@ class TinyWorld:
                   [{agent_name: [action_1, action_2, ...]}, {agent_name_2: [action_1, action_2, ...]}, ...]
         """
         agents_actions_over_time = []
+
+        # Reset TASK_OVER tracking for this run so agents are active again
+        # after a previous run (supports sequential multi-task execution).
+        if self._allow_early_stop_via_task_over:
+            self._task_over_agents = set()
+
         for i in range(steps):
             logger.info(
                 f"[{self.name}] Running world simulation step {i+1} of {steps}."
@@ -253,6 +271,17 @@ class TinyWorld:
                 parallelize=parallelize,
             )
             agents_actions_over_time.append(agents_actions)
+
+            # Early stop: if all agents have signaled TASK_OVER, skip remaining steps
+            if (self._allow_early_stop_via_task_over
+                    and len(self._task_over_agents) >= len(self.agents)):
+                remaining = steps - (i + 1)
+                if remaining > 0 and TinyWorld.communication_display:
+                    self.console.print(
+                        f"\n  :party_popper: [bold bright_green]All agents have signaled "
+                        f"TASK_OVER. Skipping remaining {remaining} step(s).[/]\n"
+                    )
+                break
 
         if return_actions:
             return agents_actions_over_time
@@ -450,6 +479,7 @@ class TinyWorld:
             # Check if the agent name is already there.
             if agent.name not in self.name_to_agent:
                 agent.environment = self
+                agent._allow_task_over = self._allow_early_stop_via_task_over
                 self.agents.append(agent)
                 self.name_to_agent[agent.name] = agent
             else:
@@ -471,6 +501,7 @@ class TinyWorld:
         logger.debug(f"Removing agent {agent.name} from the environment.")
         self.agents.remove(agent)
         del self.name_to_agent[agent.name]
+        self._task_over_agents.discard(agent.name)
 
         return self  # for chaining
 
@@ -481,6 +512,7 @@ class TinyWorld:
         logger.debug(f"Removing all agents from the environment.")
         self.agents = []
         self.name_to_agent = {}
+        self._task_over_agents = set()
 
         return self  # for chaining
 
@@ -546,6 +578,8 @@ class TinyWorld:
                 self._handle_talk(source, content, target)
             elif action_type == "SHOW":
                 self._handle_show(source, action, target)
+            elif action_type == "TASK_OVER":
+                self._handle_task_over(source, content)
 
     @transactional()
     def _handle_reach_out(self, source_agent: TinyPerson, content: str, target: str):
@@ -640,6 +674,32 @@ class TinyWorld:
             for agent in self.agents:
                 if agent != source_agent:
                     agent.see(images=resolved_images, description=content, source=source_agent)
+
+    @transactional()
+    def _handle_task_over(self, source_agent: TinyPerson, content: str):
+        """
+        Handles the TASK_OVER action — agent signals its current task is fully complete.
+
+        The agent is added to ``_task_over_agents`` so subsequent simulation steps
+        skip it.  When all agents in the world have signaled TASK_OVER, the current
+        ``run()`` will stop early.
+
+        The ``_task_over_agents`` set is reset at the start of each ``run()`` call,
+        allowing the same agent to be given a new task and participate in subsequent
+        runs.
+
+        Args:
+            source_agent (TinyPerson): The agent that issued TASK_OVER.
+            content (str): Optional explanation of why the task is complete.
+        """
+        self._task_over_agents.add(source_agent.name)
+
+        reason = f": {content}" if content else ""
+        if TinyWorld.communication_display:
+            self.console.print(
+                f"  :white_check_mark: [bold bright_green]{source_agent.name}[/] "
+                f"signaled [bold]TASK_OVER[/]{reason}"
+            )
 
     #######################################################################
     # Interaction methods
@@ -968,6 +1028,10 @@ class TinyWorld:
 
         state = copy.deepcopy(to_copy)
 
+        # Convert set to list for JSON serialization
+        if "_task_over_agents" in state and isinstance(state["_task_over_agents"], set):
+            state["_task_over_agents"] = list(state["_task_over_agents"])
+
         # agents are encoded separately
         state["agents"] = [agent.encode_complete_state() for agent in self.agents]
 
@@ -1014,6 +1078,10 @@ class TinyWorld:
 
         # restore datetime
         state["current_datetime"] = datetime.fromisoformat(state["current_datetime"])
+
+        # Convert list back to set for _task_over_agents
+        if "_task_over_agents" in state and isinstance(state["_task_over_agents"], list):
+            state["_task_over_agents"] = set(state["_task_over_agents"])
 
         # restore other fields
         self.__dict__.update(state)

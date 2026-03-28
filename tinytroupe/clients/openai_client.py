@@ -34,12 +34,14 @@ class OpenAIClient:
         cache_api_calls="cache_api_calls",
         cache_file_name="cache_file_name",
         max_concurrent_model_calls="max_concurrent_model_calls",
+        rpm="rpm",
     )
     def __init__(
         self,
         cache_api_calls=None,
         cache_file_name=None,
         max_concurrent_model_calls=None,
+        rpm=None,
     ) -> None:
         logger.debug("Initializing OpenAIClient")
         self._cache_lock = threading.RLock()
@@ -51,6 +53,13 @@ class OpenAIClient:
             if self._max_concurrent_model_calls is not None
             else None
         )
+
+        # RPM (requests per minute) rate limiter.
+        # Stores the monotonic time of the last API call so we can
+        # enforce a minimum interval between calls.
+        self._rpm = float(rpm) if rpm else 0
+        self._rpm_lock = threading.Lock()
+        self._last_call_time = 0.0
 
         # Initialize cost tracking variables
         self._cost_stats_lock = threading.RLock()
@@ -212,13 +221,16 @@ class OpenAIClient:
             if waiting_time <= 0:
                 waiting_time = 2
 
-            logger.info(
-                f"Request failed. Waiting {waiting_time} seconds between requests..."
+            next_waiting_time = waiting_time * exponential_backoff_factor
+            logger.warning(
+                f"Exponential backoff (attempt {i}/{max_attempts}): "
+                f"waiting {waiting_time:.0f}s before retry. "
+                f"Next wait will be {next_waiting_time:.0f}s."
             )
             time.sleep(waiting_time)
 
             # exponential backoff
-            waiting_time = waiting_time * exponential_backoff_factor
+            waiting_time = next_waiting_time
 
         # setup the OpenAI configurations for this client.
         self._setup_from_config()
@@ -286,6 +298,10 @@ class OpenAIClient:
                     )
                     time.sleep(waiting_time)
 
+                # RPM rate limiter: enforce minimum interval between API calls
+                if self._rpm > 0 and pre_cached_response is None:
+                    self._enforce_rpm()
+
                 with self._concurrency_slot():
                     response = None
                     cached_response = (
@@ -349,12 +365,19 @@ class OpenAIClient:
 
             except openai.RateLimitError:
                 logger.warning(
-                    f"[{i}] Rate limit error, waiting a bit and trying again."
+                    f"[{i}] Rate limit error (attempt {i}/{max_attempts}). "
+                    f"Retrying after {max(waiting_time, 2):.0f}s backoff..."
                 )
                 aux_exponential_backoff()
 
             except NonTerminalError as e:
-                logger.error(f"[{i}] Non-terminal error: {e}")
+                logger.error(
+                    f"[{i}] Non-terminal error (attempt {i}/{max_attempts}): {e}"
+                )
+                logger.warning(
+                    f"Retrying after {max(waiting_time, 2):.0f}s backoff "
+                    f"({max_attempts - i} attempts remaining)..."
+                )
                 aux_exponential_backoff()
 
             except APITimeoutError as e:
@@ -525,6 +548,27 @@ class OpenAIClient:
             yield
         finally:
             self._concurrency_semaphore.release()
+
+    def _enforce_rpm(self):
+        """
+        Enforce RPM (requests per minute) rate limiting.
+
+        If ``self._rpm`` is positive, this method ensures at least
+        ``60 / rpm`` seconds elapse between consecutive API calls.
+        Thread-safe via ``self._rpm_lock``.
+        """
+        min_interval = 60.0 / self._rpm
+        with self._rpm_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_call_time
+            if elapsed < min_interval:
+                sleep_time = min_interval - elapsed
+                logger.info(
+                    f"RPM rate limiter: waiting {sleep_time:.1f}s "
+                    f"(RPM={self._rpm}, min interval={min_interval:.1f}s)"
+                )
+                time.sleep(sleep_time)
+            self._last_call_time = time.monotonic()
 
     def _count_tokens(self, messages: list, model: str):
         """

@@ -488,3 +488,407 @@ def test_faculty_process_request_user_help(setup):
         assert any(h["kind"] == "pause_for_action" for h in auto_ui.history)
     finally:
         faculty.close_browser()
+
+
+# ======================================================================
+# Content filter tests
+# ======================================================================
+
+@pytest.mark.core
+def test_faculty_content_filter_prompt_stored(setup):
+    """content_filter_prompt is stored and accessible."""
+    filter_prompt = "Keep only the sidebar and the main content area."
+    faculty = TinyWebBrowserFaculty(content_filter_prompt=filter_prompt)
+    assert faculty._content_filter_prompt == filter_prompt
+
+
+@pytest.mark.core
+def test_faculty_content_filter_default_none(setup):
+    """content_filter_prompt defaults to None (no filtering)."""
+    faculty = TinyWebBrowserFaculty()
+    assert faculty._content_filter_prompt is None
+
+
+@pytest.mark.core
+def test_constraints_mention_content_filtering(setup):
+    """The constraints prompt mentions content filtering."""
+    faculty = TinyWebBrowserFaculty()
+    prompt = faculty.actions_constraints_prompt()
+    assert "CONTENT FILTERED" in prompt or "content filter" in prompt.lower()
+
+
+@pytest.mark.slow
+def test_content_filter_reduces_content(setup):
+    """When content_filter_prompt is set, _apply_content_filter reduces page content."""
+    faculty = TinyWebBrowserFaculty(
+        content_filter_prompt="Keep only headings and links. Remove all body text.",
+    )
+
+    # Simulate a large page with mixed content
+    page_content = (
+        "# Main Heading\n"
+        "link: https://example.com\n"
+        "paragraph: " + "Lorem ipsum dolor sit amet. " * 200 + "\n"
+        "## Sub Heading\n"
+        "link: https://example.com/about\n"
+        "paragraph: " + "Consectetur adipiscing elit. " * 200 + "\n"
+    )
+
+    filtered = faculty._apply_content_filter(page_content)
+
+    # The filter should have reduced the content
+    assert len(filtered) < len(page_content)
+    # The suppression marker should appear
+    assert "CONTENT FILTERED" in filtered
+
+
+# ======================================================================
+# Page guide tests
+# ======================================================================
+
+@pytest.mark.core
+def test_faculty_page_guide_prompt_stored(setup):
+    """page_guide_prompt is stored and accessible."""
+    guide_prompt = "Describe the sidebar and the main form area."
+    faculty = TinyWebBrowserFaculty(page_guide_prompt=guide_prompt)
+    assert faculty._page_guide_prompt == guide_prompt
+
+
+@pytest.mark.core
+def test_faculty_page_guide_default_none(setup):
+    """page_guide_prompt defaults to None (no guide generation)."""
+    faculty = TinyWebBrowserFaculty()
+    assert faculty._page_guide_prompt is None
+
+
+@pytest.mark.core
+def test_constraints_mention_page_guide(setup):
+    """The constraints prompt mentions the page guide feature."""
+    faculty = TinyWebBrowserFaculty()
+    prompt = faculty.actions_constraints_prompt()
+    assert "page guide" in prompt.lower() or "Page guide" in prompt
+
+
+@pytest.mark.core
+def test_actions_mention_full_page_content_on_demand(setup):
+    """The actions prompt mentions get_content for full page detail."""
+    faculty = TinyWebBrowserFaculty()
+    prompt = faculty.actions_definitions_prompt()
+    assert "full page content" in prompt.lower() or "full page structure" in prompt.lower()
+
+
+@pytest.mark.core
+def test_faculty_page_guide_serialization_roundtrip(setup):
+    """page_guide_prompt survives JSON serialization / deserialization."""
+    guide_prompt = "Describe the form layout and input fields."
+    faculty = TinyWebBrowserFaculty(
+        page_guide_prompt=guide_prompt,
+        content_filter_prompt="Keep only headings.",
+        browser_channel="chromium",
+    )
+
+    json_dict = faculty.to_json()
+    assert json_dict["page_guide_prompt"] == guide_prompt
+    assert json_dict["content_filter_prompt"] == "Keep only headings."
+
+    restored = TinyWebBrowserFaculty.from_json(json_dict)
+    assert restored._page_guide_prompt == guide_prompt
+    assert restored._content_filter_prompt == "Keep only headings."
+
+
+@pytest.mark.core
+def test_faculty_page_guide_and_filter_coexist(setup):
+    """page_guide_prompt and content_filter_prompt can both be set simultaneously."""
+    faculty = TinyWebBrowserFaculty(
+        page_guide_prompt="Describe the sidebar and buttons.",
+        content_filter_prompt="Keep only form elements.",
+    )
+    assert faculty._page_guide_prompt is not None
+    assert faculty._content_filter_prompt is not None
+
+
+@pytest.mark.core
+def test_page_guide_generates_concise_output(setup):
+    """_apply_page_guide generates a concise NL guide from page content."""
+    faculty = TinyWebBrowserFaculty(
+        page_guide_prompt=(
+            "Describe: 1) The search form with input and submit button. "
+            "2) The navigation links at the top."
+        ),
+    )
+
+    # Simulate a page with known interactive elements
+    page_content = (
+        "[Page: Example Search]\n"
+        "  [0] heading \"Search Portal\"\n"
+        "  [1] navigation \"Main Nav\"\n"
+        "    [2] link \"Home\"\n"
+        "    [3] link \"About\"\n"
+        "    [4] link \"Contact\"\n"
+        "  [5] heading \"Search\"\n"
+        "  [6] textbox \"Enter your search query...\" [placeholder]\n"
+        "  [7] button \"Search\"\n"
+        "  [8] heading \"Results\"\n"
+        "  [9] paragraph \"No results yet.\"\n"
+    )
+
+    guide = faculty._apply_page_guide(page_content)
+
+    # Guide should be non-empty and concise (not the full tree)
+    assert len(guide) > 50
+    assert len(guide) < len(page_content) * 3  # should not balloon
+
+    # Guide should mention key elements from the instructions
+    guide_lower = guide.lower()
+    assert "search" in guide_lower or "textbox" in guide_lower or "input" in guide_lower
+    assert "button" in guide_lower or "submit" in guide_lower
+
+
+@pytest.mark.core
+def test_page_guide_observation_flow(setup):
+    """With page_guide_prompt set, process_action produces BROWSER_PAGE_GUIDE
+    and a metadata-only BROWSER_OBSERVATION (no full tree)."""
+    oscar = create_oscar_the_architect()
+    faculty = TinyWebBrowserFaculty(
+        browser_channel="chromium",
+        headless=True,
+        user_interaction=AutoUserInteraction(),
+        page_guide_prompt=(
+            "Describe: 1) The main heading. 2) Any links on the page."
+        ),
+    )
+    oscar.add_mental_faculty(faculty)
+
+    try:
+        result = faculty.process_action(
+            oscar,
+            {"type": "BROWSE_ACTION", "content": "goto https://example.com", "target": ""},
+        )
+        assert result is True
+
+        # Inspect the stimuli stored in episodic memory
+        memories = oscar.episodic_memory.retrieve_all()
+        all_stimuli = []
+        for mem in memories:
+            content = mem.get("content", {})
+            if isinstance(content, dict):
+                for s in content.get("stimuli", []):
+                    all_stimuli.append(s)
+
+        stim_types = [s.get("type") for s in all_stimuli]
+
+        # Should have a BROWSER_PAGE_GUIDE stimulus
+        assert "BROWSER_PAGE_GUIDE" in stim_types, (
+            f"Expected BROWSER_PAGE_GUIDE in stimuli, got: {stim_types}"
+        )
+
+        # Should have a BROWSER_OBSERVATION stimulus
+        assert "BROWSER_OBSERVATION" in stim_types
+
+        # The BROWSER_OBSERVATION should NOT contain the full page tree
+        # (since the guide is active, tree is opt-in)
+        browser_obs = [s for s in all_stimuli if s["type"] == "BROWSER_OBSERVATION"]
+        for obs in browser_obs:
+            obs_text = obs.get("content", "")
+            assert "Page content omitted" in obs_text or "get_content" in obs_text
+
+    finally:
+        faculty.close_browser()
+
+
+@pytest.mark.core
+def test_get_content_returns_full_tree_when_guide_active(setup):
+    """BROWSE_ACTION get_content always returns the full accessibility tree,
+    even when page_guide_prompt is set."""
+    oscar = create_oscar_the_architect()
+    faculty = TinyWebBrowserFaculty(
+        browser_channel="chromium",
+        headless=True,
+        user_interaction=AutoUserInteraction(),
+        page_guide_prompt="Describe the main heading and links.",
+    )
+    oscar.add_mental_faculty(faculty)
+
+    try:
+        # Navigate first
+        faculty.process_action(
+            oscar,
+            {"type": "BROWSE_ACTION", "content": "goto https://example.com", "target": ""},
+        )
+
+        # Request full content
+        faculty.process_action(
+            oscar,
+            {"type": "BROWSE_ACTION", "content": "get_content", "target": ""},
+        )
+
+        # Find the BROWSER_OBSERVATION from the get_content action
+        memories = oscar.episodic_memory.retrieve_all()
+        all_stimuli = []
+        for mem in memories:
+            content = mem.get("content", {})
+            if isinstance(content, dict):
+                for s in content.get("stimuli", []):
+                    all_stimuli.append(s)
+
+        # Find observations from the get_content action
+        get_content_obs = [
+            s for s in all_stimuli
+            if s["type"] == "BROWSER_OBSERVATION"
+            and "get_content" in s.get("content", "")
+        ]
+        assert len(get_content_obs) > 0, "Should have a BROWSER_OBSERVATION for get_content"
+
+        # The observation should contain actual page content (full tree forced)
+        obs_content = get_content_obs[-1]["content"]
+        assert "```" in obs_content, (
+            "get_content observation should include the full tree in a code block"
+        )
+        # Should NOT say content was omitted
+        assert "Page content omitted" not in obs_content
+
+    finally:
+        faculty.close_browser()
+
+
+@pytest.mark.core
+def test_no_guide_preserves_full_tree_in_observation(setup):
+    """Without page_guide_prompt, BROWSER_OBSERVATION includes the full tree (backward compat)."""
+    oscar = create_oscar_the_architect()
+    faculty = TinyWebBrowserFaculty(
+        browser_channel="chromium",
+        headless=True,
+        user_interaction=AutoUserInteraction(),
+        # No page_guide_prompt — backward-compatible mode
+    )
+    oscar.add_mental_faculty(faculty)
+
+    try:
+        result = faculty.process_action(
+            oscar,
+            {"type": "BROWSE_ACTION", "content": "goto https://example.com", "target": ""},
+        )
+        assert result is True
+
+        # Find BROWSER_OBSERVATION stimuli
+        memories = oscar.episodic_memory.retrieve_all()
+        all_stimuli = []
+        for mem in memories:
+            content = mem.get("content", {})
+            if isinstance(content, dict):
+                for s in content.get("stimuli", []):
+                    all_stimuli.append(s)
+
+        browser_obs = [s for s in all_stimuli if s["type"] == "BROWSER_OBSERVATION"]
+        assert len(browser_obs) > 0
+
+        # Should contain actual page content (the tree)
+        obs_content = browser_obs[-1]["content"]
+        assert "Page content" in obs_content
+        assert "```" in obs_content
+        # Should NOT have the opt-in message
+        assert "Page content omitted" not in obs_content
+
+        # Should NOT have BROWSER_PAGE_GUIDE
+        stim_types = [s.get("type") for s in all_stimuli]
+        assert "BROWSER_PAGE_GUIDE" not in stim_types
+
+    finally:
+        faculty.close_browser()
+
+
+# ======================================================================
+# Underspecified selector guard tests
+# ======================================================================
+
+@pytest.mark.core
+def test_reject_bare_element_type_selectors(setup):
+    """Bare HTML element types like 'radio', 'button', 'input' are rejected."""
+    for bare in ("radio", "button", "input", "textbox", "checkbox",
+                 "select", "textarea", "link", "label"):
+        result = TinyWebBrowserFaculty._reject_underspecified_selector(bare, "click")
+        assert result is not None, f"'{bare}' should be rejected"
+        assert result["success"] is False
+        assert "too generic" in result["error"]
+
+
+@pytest.mark.core
+def test_reject_bare_role_selectors(setup):
+    """Bare role= selectors like 'role=radio', 'role=button' are rejected."""
+    for role_type in ("radio", "button", "checkbox", "textbox", "input"):
+        selector = f"role={role_type}"
+        result = TinyWebBrowserFaculty._reject_underspecified_selector(selector, "click")
+        assert result is not None, f"'{selector}' should be rejected"
+        assert result["success"] is False
+        assert "too generic" in result["error"]
+
+
+@pytest.mark.core
+def test_accept_qualified_role_selectors(setup):
+    """Role selectors with [name=...] qualifier are accepted."""
+    qualified = [
+        'role=radio[name="Left is better"]',
+        'role=button[name="Submit"]',
+        'role=textbox[name="Enter your query"]',
+        'role=checkbox[name="Donate query"]',
+    ]
+    for selector in qualified:
+        result = TinyWebBrowserFaculty._reject_underspecified_selector(selector, "click")
+        assert result is None, f"'{selector}' should be accepted"
+
+
+@pytest.mark.core
+def test_accept_text_and_css_selectors(setup):
+    """Text=, CSS class, ID, and :has-text() selectors are accepted."""
+    valid = [
+        "text=Submit",
+        "text=Send",
+        "#my-button",
+        ".submit-btn",
+        "button:has-text('Send')",
+        "listitem:has-text('<unset query>')",
+        "input[name=email]",
+        "[data-testid='submit']",
+        "div.results >> button",
+    ]
+    for selector in valid:
+        result = TinyWebBrowserFaculty._reject_underspecified_selector(selector, "click")
+        assert result is None, f"'{selector}' should be accepted"
+
+
+@pytest.mark.core
+def test_reject_empty_selector(setup):
+    """Empty string selector is rejected with a helpful message."""
+    result = TinyWebBrowserFaculty._reject_underspecified_selector("", "click")
+    assert result is not None
+    assert result["success"] is False
+    assert "requires a selector" in result["error"]
+
+
+@pytest.mark.core
+def test_reject_case_insensitive(setup):
+    """Rejection is case-insensitive ('Radio', 'BUTTON', 'Role=Radio')."""
+    for selector in ("Radio", "BUTTON", "INPUT", "Role=Radio", "ROLE=BUTTON"):
+        result = TinyWebBrowserFaculty._reject_underspecified_selector(selector, "click")
+        assert result is not None, f"'{selector}' should be rejected (case insensitive)"
+
+
+@pytest.mark.core
+def test_error_message_suggests_alternatives(setup):
+    """Error messages include actionable examples of qualified selectors."""
+    result = TinyWebBrowserFaculty._reject_underspecified_selector("radio", "click")
+    assert "role=radio[name=" in result["error"]
+    assert "text=" in result["error"]
+    assert "BROWSE" in result["error"]
+
+    # role= variant also gives good suggestions
+    result = TinyWebBrowserFaculty._reject_underspecified_selector("role=button", "click")
+    assert "role=button[name=" in result["error"]
+
+
+@pytest.mark.core
+def test_constraints_mention_bare_selectors(setup):
+    """The constraints prompt warns against bare element-type selectors."""
+    faculty = TinyWebBrowserFaculty()
+    prompt = faculty.actions_constraints_prompt()
+    assert "bare element" in prompt.lower() or "click radio" in prompt.lower() or "too generic" in prompt.lower() or "Never use bare" in prompt

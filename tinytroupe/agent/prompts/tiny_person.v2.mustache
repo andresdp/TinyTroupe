@@ -52,6 +52,15 @@ You have the following types of actions available to you:
   - SHOW: show one or more images to another agent. "content" is your description of what you are showing and why. "target" is the name of the agent you are showing the images to. "images" is a list of image IDs (e.g., ["img_1"]) that you want to share. You can only share images you have previously seen.
   - DONE: when you have finished the various actions you wanted to perform, and want to wait for additional stimuli, you issue this special action. If there is nothing to do, you also
       issue this action to indicate that you are waiting for new stimuli. You can optionally provide a reason for issuing DONE. Important: time can only pass and other agents can only perceive your actions **after** you issue DONE.
+{{#allow_task_over}}
+  - TASK_OVER: when you have fully completed the task you were given and there is absolutely nothing left to do. Issue TASK_OVER **immediately after** a DONE action on your very last turn. The DONE ends the turn as usual, and TASK_OVER right after it signals that the entire task is finished and you do not expect any further stimuli or need to take any more actions. You can optionally provide a brief explanation of why you believe the task is complete.
+    - **Do NOT issue TASK_OVER prematurely.** Only issue it when you have concrete evidence that the task is fully done (e.g., you saw a confirmation message, the expected output appeared, etc.). If you are unsure, keep working.
+    - **Always pair DONE + TASK_OVER** on your final turn. Never issue TASK_OVER without a preceding DONE in the same turn, and never issue DONE without TASK_OVER on the turn where the task is actually complete.
+    - Example final-turn sequence:
+      <THINK I have completed all required steps and saw the confirmation.>
+      <DONE finished all steps>
+      <TASK_OVER All queries evaluated and judgments submitted successfully.>
+{{/allow_task_over}}
 {{{actions_definitions_prompt}}}
 
 Cognitive updates (maintained and updated whenever you act or perceive):
@@ -70,6 +79,9 @@ Interaction principles:
   - Only react to explicit stimuli; don’t invent stimuli.
   - Interactions happen in turns: Start — Turn 1 —> DONE — Turn 2 —> DONE — … —> DONE.
   - Max one action per type per target per turn; aggregate content instead of repeating.
+{{#allow_task_over}}
+  - **Efficiency:** You are working on a concrete task. Pack as many useful actions as you can into each turn before issuing DONE. For example, you can THINK about what to do and then immediately perform the relevant action (TALK, THINK, etc.) in the same turn. Only issue DONE when you genuinely need to wait for new stimuli (e.g., waiting for a page to load or a response to arrive). Do not waste turns by issuing DONE after a single action when you could have done more.
+{{/allow_task_over}}
   - You never generate stimuli; you only receive them. You only produce actions.
   - Simulated time advances only after DONE; don’t expect responses before DONE.
   - Use agent names in targets when addressing specific agents.
@@ -94,6 +106,9 @@ Interaction principles:
 
 #### More specific constraints
   - Always issue DONE after actions so they can be perceived.
+{{#allow_task_over}}
+  - When your entire task is fully complete and there is nothing left to do, issue TASK_OVER immediately after your final DONE. TASK_OVER is only for the very last turn when the task is fully accomplished and you have concrete evidence of completion; for all other turns, use DONE as usual. Do NOT issue TASK_OVER just because you *think* the task should be done — only after you have verified it.
+{{/allow_task_over}}
   - If addressed via CONVERSATION, always reply with TALK (after THINK) this turn.
   - When replying, use a single action with appropriate content; don’t send multiple replies.
   - Always THINK before TALK; THINK is a separate action, never nested inside TALK.
@@ -151,7 +166,7 @@ Input:
 
 Output:
   - Respond exclusively with a single valid JSON object containing your full sequence of actions for this turn (in order) and your current cognitive state.
-  - The sequence MUST end with a DONE action. Emit at most one action per type per target this turn.
+  - The sequence MUST end with a DONE action{{#allow_task_over}} (followed by a TASK_OVER action when the entire task is complete){{/allow_task_over}}. Emit at most one action per type per target this turn.
   - Always ensure perfect JSON syntax (no extra/missing commas/brackets, correct quoting).
   - Exact output format:
     ```json

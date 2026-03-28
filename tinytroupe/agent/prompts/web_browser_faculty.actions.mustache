@@ -43,11 +43,12 @@ Use `BROWSE_ACTION` **only** when you need precise atomic control and you know t
 | `fill` | `fill <css_selector> <text>` | Fill an input matching a CSS selector. ⚠️ Requires a valid CSS selector like `input[name=email]`, NOT a word like "textbox" |
 | `select` | `select <css_selector> <value>` | Select a dropdown option |
 | `press` | `press <key>` | Press a keyboard key (Enter, Tab, Escape, etc.) |
-| `scroll` | `scroll <up\|down> [amount]` | Scroll the page (default: 300px) |
+| `scroll` | `scroll <up\|down> [amount]` | Scroll the **main page** (default: 300px). Use this to reveal content below the fold — buttons, forms, and interactive elements are often at the bottom of the page. |
+| `scroll_element` | `scroll_element <css_selector> <up\|down> [amount]` | Scroll a **specific scrollable container** (e.g., a sidebar panel, a list within a div) rather than the main page. Use this when a sidebar or panel has its own scrollbar and `scroll` doesn't affect it. Example: `scroll_element .sidebar-class down 500` |
 | `hover` | `hover <css_selector>` | Hover over an element |
 | `screenshot` | `screenshot` | Capture the current page state |
-| `get_content` | `get_content` | Retrieve the current page content |
-| `observe` | `observe` | Take a fresh screenshot and re-read the current page content without performing any action. Use this to check what the page looks like right now, or if the last observation seems stale |
+| `get_content` | `get_content` | Retrieve the full page content (accessibility tree). Use this to see the complete structure when the page guide does not provide enough detail, or to discover elements not mentioned in the guide |
+| `observe` | `observe` | Take a fresh screenshot and re-read the full page content without performing any action. Use this to check what the page looks like right now, or to get full page detail when only a page guide summary is available |
 | `wait_for_stable` | `wait_for_stable` | Wait until the page content stops changing (useful for streaming responses, loading states) |
 | `new_tab` | `new_tab [url]` | Open a new browser tab |
 | `switch_tab` | `switch_tab <index>` | Switch to a specific tab |
@@ -61,6 +62,8 @@ Use `BROWSE_ACTION` **only** when you need precise atomic control and you know t
 - Clicking elements with known selectors: `click text=Submit`, `click listitem:has-text('<unset query>')`
 - **NOT for filling text fields** unless you know the exact CSS selector — use BROWSE instead
 
+**⚠️ NEVER use bare element types as selectors** — `click radio`, `click button`, `click input` will FAIL because they match the first element on the page (usually wrong). Always qualify with text, name, or role — e.g., `click role=radio[name="Left is better"]`, `click text=Submit`.
+
 **Examples:**
 ```
 {"type": "BROWSE_ACTION", "content": "click listitem:has-text('<unset query>')", "target": ""}
@@ -71,6 +74,11 @@ Use `BROWSE_ACTION` **only** when you need precise atomic control and you know t
 {"type": "BROWSE_ACTION", "content": "observe", "target": ""}
 {"type": "BROWSE_ACTION", "content": "wait_for_stable", "target": ""}
 ```
+
+**Tips:**
+- If the page content in your observation ends with `... [content truncated]`, important elements may be hidden below. Use `scroll down 500` to reveal them.
+- After scrolling, you will receive an updated observation showing the newly visible content.
+- **Action failures can happen.** Sometimes a BROWSE action fails because the system could not locate the right element (e.g. a selector timed out). When this happens, you will see an "Action FAILED" message in your browser observation. The system retries automatically, but if it still fails, **you should try again** — possibly rephrasing the instruction, scrolling to reveal hidden elements first, or switching to a BROWSE_ACTION with a more specific selector.
 
 ### Requesting user help (BROWSE_REQUEST_USER_HELP)
 

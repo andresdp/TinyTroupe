@@ -368,6 +368,189 @@ class TestEpisodicMemory:
         with pytest.raises(NotImplementedError):
             memory.retrieve_relevant("test query", top_k=5)
 
+    # ------------------------------------------------------------------
+    # Memory decay tests
+    # ------------------------------------------------------------------
+
+    def test_decay_on_store(self, setup):
+        """Storing a new item decays oversized content in earlier buffer items."""
+        memory = EpisodicMemory(enable_decay=True, decay_rate=0.5,
+                                max_decayed_content_length=100,
+                                decay_protection_count=1)
+
+        large_text = "x" * 1000
+        memory.store({
+            "role": "user",
+            "content": {"stimuli": [{"type": "OBS", "content": large_text, "source": ""}]},
+            "type": "stimulus",
+            "simulation_timestamp": None,
+        })
+        # First item — no decay yet (it is the newest)
+        assert len(memory.episodic_buffer[0]["content"]["stimuli"][0]["content"]) == 1000
+
+        # Store a second item → triggers decay on the first
+        memory.store({"role": "assistant", "content": {"action": {"type": "DONE", "content": "", "target": ""}},
+                       "type": "action", "simulation_timestamp": None})
+
+        decayed = memory.episodic_buffer[0]["content"]["stimuli"][0]["content"]
+        # Should be roughly 500 chars + decay marker
+        assert len(decayed) < 1000
+        assert decayed.endswith(EpisodicMemory._DECAY_MARKER)
+
+    def test_decay_converges_to_floor(self, setup):
+        """Repeated stores shrink content to max_decayed_content_length."""
+        memory = EpisodicMemory(enable_decay=True, decay_rate=0.5,
+                                max_decayed_content_length=100,
+                                decay_protection_count=1)
+
+        memory.store({
+            "role": "user",
+            "content": {"stimuli": [{"type": "OBS", "content": "x" * 1000, "source": ""}]},
+            "type": "stimulus",
+            "simulation_timestamp": None,
+        })
+
+        # Store many more items to force convergence
+        for _ in range(15):
+            memory.store({"role": "user", "content": "small", "type": "stimulus",
+                          "simulation_timestamp": None})
+
+        raw = memory._strip_decay_marker(
+            memory.episodic_buffer[0]["content"]["stimuli"][0]["content"]
+        )
+        assert len(raw) <= 100
+
+    def test_newest_item_not_decayed(self, setup):
+        """The most recently stored item retains full content."""
+        memory = EpisodicMemory(enable_decay=True, decay_rate=0.5,
+                                max_decayed_content_length=100)
+
+        large_text = "y" * 5000
+        memory.store({
+            "role": "user",
+            "content": {"stimuli": [{"type": "OBS", "content": large_text, "source": ""}]},
+            "type": "stimulus",
+            "simulation_timestamp": None,
+        })
+        # The item is the newest → not decayed
+        assert len(memory.episodic_buffer[-1]["content"]["stimuli"][0]["content"]) == 5000
+
+    def test_decay_disabled(self, setup):
+        """When enable_decay=False, content is never decayed."""
+        memory = EpisodicMemory(enable_decay=False, decay_rate=0.5,
+                                max_decayed_content_length=100)
+
+        memory.store({
+            "role": "user",
+            "content": {"stimuli": [{"type": "OBS", "content": "x" * 1000, "source": ""}]},
+            "type": "stimulus",
+            "simulation_timestamp": None,
+        })
+        memory.store({"role": "user", "content": "small", "type": "stimulus",
+                      "simulation_timestamp": None})
+
+        # First item should NOT be decayed
+        assert len(memory.episodic_buffer[0]["content"]["stimuli"][0]["content"]) == 1000
+
+    def test_commit_enforces_ceiling(self, setup):
+        """commit_episode() hard-truncates all items to the floor."""
+        memory = EpisodicMemory(enable_decay=True, decay_rate=0.95,
+                                max_decayed_content_length=100)
+
+        # With decay_rate=0.95, items decay very slowly.
+        memory.store({
+            "role": "user",
+            "content": {"stimuli": [{"type": "OBS", "content": "x" * 5000, "source": ""}]},
+            "type": "stimulus",
+            "simulation_timestamp": None,
+        })
+
+        memory.commit_episode()
+
+        # After commit, the item in permanent memory should be at or below the ceiling
+        raw = memory._strip_decay_marker(
+            memory.memory[0]["content"]["stimuli"][0]["content"]
+        )
+        assert len(raw) <= 100
+
+    def test_decay_action_content(self, setup):
+        """Decay also works on action content fields."""
+        memory = EpisodicMemory(enable_decay=True, decay_rate=0.5,
+                                max_decayed_content_length=100,
+                                decay_protection_count=1)
+
+        memory.store({
+            "role": "assistant",
+            "content": {"action": {"type": "THINK", "content": "z" * 1000, "target": ""}},
+            "type": "action",
+            "simulation_timestamp": None,
+        })
+        memory.store({"role": "user", "content": "trigger", "type": "stimulus",
+                      "simulation_timestamp": None})
+
+        decayed = memory.episodic_buffer[0]["content"]["action"]["content"]
+        assert len(decayed) < 1000
+        assert decayed.endswith(EpisodicMemory._DECAY_MARKER)
+
+    def test_decay_protection_count(self, setup):
+        """Items within the decay_protection_count window are not decayed.
+
+        This mirrors the psychological recency effect: the most recent
+        experiences are retained at full fidelity for ongoing processing,
+        while older memories gradually fade."""
+        protection = 3
+        memory = EpisodicMemory(enable_decay=True, decay_rate=0.5,
+                                max_decayed_content_length=100,
+                                decay_protection_count=protection)
+
+        large_item = lambda: {
+            "role": "user",
+            "content": {"stimuli": [{"type": "OBS", "content": "x" * 1000, "source": ""}]},
+            "type": "stimulus",
+            "simulation_timestamp": None,
+        }
+
+        # Store enough items so that the first falls outside the protection window
+        for _ in range(protection + 2):
+            memory.store(large_item())
+
+        # Items inside the protection window (last `protection` items) must be intact
+        for item in memory.episodic_buffer[-protection:]:
+            assert len(item["content"]["stimuli"][0]["content"]) == 1000
+
+        # Items outside the window should have been decayed
+        for item in memory.episodic_buffer[:-protection]:
+            content = item["content"]["stimuli"][0]["content"]
+            assert len(content) < 1000
+            assert content.endswith(EpisodicMemory._DECAY_MARKER)
+
+    def test_decay_protection_count_minimum_is_one(self, setup):
+        """decay_protection_count is clamped to at least 1."""
+        memory = EpisodicMemory(enable_decay=True, decay_protection_count=0)
+        assert memory.decay_protection_count == 1
+
+        memory2 = EpisodicMemory(enable_decay=True, decay_protection_count=-5)
+        assert memory2.decay_protection_count == 1
+
+    def test_decay_protection_count_equals_buffer_size(self, setup):
+        """When all buffer items fall within the protection window, none are decayed."""
+        memory = EpisodicMemory(enable_decay=True, decay_rate=0.5,
+                                max_decayed_content_length=100,
+                                decay_protection_count=10)
+
+        # Store fewer items than the protection count
+        for _ in range(5):
+            memory.store({
+                "role": "user",
+                "content": {"stimuli": [{"type": "OBS", "content": "x" * 1000, "source": ""}]},
+                "type": "stimulus",
+                "simulation_timestamp": None,
+            })
+
+        # All items should remain at full fidelity
+        for item in memory.episodic_buffer:
+            assert len(item["content"]["stimuli"][0]["content"]) == 1000
+
 
 class TestSemanticMemory:
     """Test cases for SemanticMemory class"""

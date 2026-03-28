@@ -46,6 +46,88 @@ from tinytroupe.utils import JsonSerializableRegistry
 logger = logging.getLogger("tinytroupe")
 
 
+# ======================================================================
+# Module-level LLM-based content filter
+# ======================================================================
+
+import tinytroupe.utils as utils
+
+
+@utils.llm(enable_json_output_format=False, enable_justification_step=False)
+def _generate_page_guide(
+    page_content: str,
+    guide_instructions: str,
+    screenshot_description: str = "",
+) -> str:
+    """
+    You are a **page-orientation assistant** for a web-browsing agent.
+
+    You will receive:
+      1. The **raw structured text** of a web page (accessibility tree, cleaned HTML, or visible text).
+      2. **Guide instructions** describing the scenario and what interactive elements the agent cares about.
+      3. An optional **screenshot description** of the current page state.
+
+    Your job is to produce a **natural-language guide** that helps the agent
+    *quickly orient itself* on the page and take the right next action. The guide must:
+
+      - **Describe the page layout** in 2-3 sentences: what sections are visible, what the page is about.
+      - **List each key interactive element** mentioned in the guide instructions. For each, provide:
+        - A short label (e.g., "Query input textbox")
+        - Its current state (visible / off-screen / empty / filled / selected / disabled)
+        - A **CSS selector or accessibility name** the agent can use in a `BROWSE_ACTION click` or `BROWSE fill` command
+          (e.g., `input[placeholder="Enter your query..."]`, `text=Send`, `role=radio[name="Left is better"]`).
+      - **Flag off-screen elements**: if an element from the guide instructions is NOT found in the visible page
+        content, note that the agent needs to **scroll down** to reveal it.
+      - **Identify scrollable containers**: if the page has sidebars, panels, or list containers that can scroll
+        independently of the main page (e.g., a sidebar with its own scrollbar), note their CSS selector so the
+        agent can use `scroll_element <selector> down` to scroll them. This is critical for panels like
+        "Query set" sidebars where items extend below the visible area.
+      - **Include verbatim content** when the guide instructions explicitly ask for specific page content
+        (e.g., response text, article bodies, data tables). Reproduce that content **in full** — do not
+        summarize or truncate it. The agent may need the complete text to make informed decisions.
+      - Use **bullet points** for clarity. Be terse on layout/navigation details — every token counts —
+        but reproduce requested content sections in full.
+      - Do NOT wrap in code fences.
+      - Do NOT make up selectors — only use identifiers you can see in the actual page content.
+
+    Output ONLY the guide text, no preamble.
+    """
+    parts = [f"## Guide instructions\n\n{guide_instructions}"]
+    if screenshot_description:
+        parts.append(f"\n## Screenshot description\n\n{screenshot_description}")
+    parts.append(f"\n## Raw page content\n\n{page_content}")
+    return "\n".join(parts)
+
+
+@utils.llm(enable_json_output_format=False, enable_justification_step=False)
+def _filter_page_content(page_content: str, filter_instructions: str) -> str:
+    """
+    You are a page-content filter for a web-browsing agent.
+
+    You will receive:
+      1. The **raw structured text** of a web page (accessibility tree, cleaned HTML, or visible text).
+      2. A set of **filter instructions** describing which sections or regions of the page are relevant.
+
+    Your job is to produce a **filtered version** of the page content that:
+      - **KEEPS** every section, element, or text fragment that matches the filter instructions — reproduced **verbatim**, preserving the original formatting, indentation, and structure exactly as-is. Do NOT rephrase, summarize, or alter the kept content in any way.
+      - **REMOVES** everything else (ads, navigation chrome, boilerplate, irrelevant data panels, etc.).
+      - At every point where content was removed, insert the following marker on its own line so the agent knows something was stripped:
+
+            ⚠️ [CONTENT FILTERED — section removed by content filter to reduce size]
+
+      - Preserve the **relative order** of kept sections exactly as they appear in the original.
+      - **Do NOT summarize** the kept sections — reproduce them in full.
+      - Do NOT wrap the output in markdown code fences or add any preamble — output only the filtered page text.
+
+    If the filter instructions are ambiguous or you are unsure whether a section matches, **keep it** (err on the side of inclusion).
+    """
+    # The docstring above is the system prompt; the return value below is the user prompt.
+    return (
+        f"## Filter instructions\n\n{filter_instructions}\n\n"
+        f"## Raw page content to filter\n\n{page_content}"
+    )
+
+
 class TinyWebBrowserFaculty(TinyMentalFaculty):
     """
     Mental faculty that equips a TinyTroupe agent with a real web browser.
@@ -70,6 +152,13 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
             :class:`ConsoleUserInteraction`.
         confirm_destructive: Whether to ask the user before destructive
             actions (form submissions, purchases, …).
+        pause_on_user_help: Whether to block the simulation when the agent
+            issues a ``BROWSE_REQUEST_USER_HELP`` action.  When ``True``
+            (default), the user is prompted to press Enter before the
+            simulation resumes.  When ``False``, a non-blocking
+            informational notice is shown instead, and the simulation
+            continues automatically.  Set to ``False`` for unattended /
+            Jupyter runs.
         wait_strategy: Playwright wait strategy — ``"domcontentloaded"``
             (fast, default), ``"load"``, or ``"networkidle"`` (slow on
             ad-heavy pages).
@@ -111,6 +200,54 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
             The wait is non-blocking — if the page hasn't stabilized
             by this timeout the agent still receives the latest
             snapshot and moves on.
+        nl_retries: Number of automatic retry attempts when an NL-
+            decomposed browser action fails (e.g. selector timeout).
+            On each retry the page state is re-captured and the sub-LLM
+            is re-called with the failure context so it can try a
+            different selector strategy.  Defaults to ``3``.
+        content_filter_prompt: Optional natural-language instructions
+            that describe which **sections** of the page content should
+            be **kept** in the observation sent to the agent.  When set,
+            an auxiliary LLM call filters the raw page content before it
+            reaches the agent, dramatically reducing prompt size on
+            complex pages.  For example::
+
+                content_filter_prompt=(
+                    "Keep only: the Query Set sidebar, the query "
+                    "input area, the Sydney Reply panes (A and B), "
+                    "and the Judgment Questionnaire section."
+                )
+
+            Set to ``None`` (default) to disable filtering and pass the
+            full content (subject to ``max_content_length`` truncation).
+        page_guide_prompt: Optional natural-language instructions that
+            describe the **scenario context** and the **key interactive
+            elements** the agent should look for on the page.  When set,
+            an auxiliary LLM call generates a short, structured
+            *page guide* (``BROWSER_PAGE_GUIDE`` stimulus) after each
+            browser action, listing the relevant UI elements with their
+            CSS selectors or accessibility names.
+
+            When a page guide is active, regular ``BROWSER_OBSERVATION``
+            stimuli **omit the full accessibility tree** to save context
+            tokens.  The agent can still request the full tree on demand
+            via ``BROWSE_ACTION get_content`` or ``BROWSE_ACTION observe``.
+
+            Example::
+
+                page_guide_prompt=(
+                    "Describe the SBS evaluation tool layout: "
+                    "1) The 'Query set' sidebar with queries and "
+                    "'<unset query>' slots. "
+                    "2) The query input textbox and Send button. "
+                    "3) The Sydney Reply panes (Result A, Result B). "
+                    "4) The Judgment Questionnaire radio buttons "
+                    "and Submit button."
+                )
+
+            Set to ``None`` (default) to disable page guide generation.
+            Can be used together with ``content_filter_prompt`` — the
+            guide always sees the **full unfiltered** page content.
         requires_faculties: Other faculties this one depends on.
     """
 
@@ -136,6 +273,7 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         viewport_height: int | None = None,
         user_interaction=None,
         confirm_destructive: bool = True,
+        pause_on_user_help: bool = True,
         action_delay_ms: int = 0,
         max_content_length: int | None = None,
         use_vision: bool = True,
@@ -145,6 +283,9 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         auto_wait_for_stable: bool = True,
         auto_wait_timeout: float = 180.0,
         real_world_side_effect_delay: float = 5.0,
+        nl_retries: int = 3,
+        content_filter_prompt: str | None = None,
+        page_guide_prompt: str | None = None,
         requires_faculties: list | None = None,
     ):
         super().__init__(name, requires_faculties,
@@ -176,6 +317,7 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         self._viewport_width = viewport_width or int(_cfg_get("VIEWPORT_WIDTH", "1280"))
         self._viewport_height = viewport_height or int(_cfg_get("VIEWPORT_HEIGHT", "720"))
         self._confirm_destructive = confirm_destructive
+        self._pause_on_user_help = pause_on_user_help
         self._action_delay_ms = action_delay_ms
         self._max_content_length = max_content_length
         self._use_vision = use_vision
@@ -184,6 +326,9 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         self._cdp_url = cdp_url
         self._auto_wait_for_stable = auto_wait_for_stable
         self._auto_wait_timeout = auto_wait_timeout
+        self._nl_retries = nl_retries
+        self._content_filter_prompt = content_filter_prompt
+        self._page_guide_prompt = page_guide_prompt
 
         # ------- user interaction backend -------
         if user_interaction is None:
@@ -230,6 +375,7 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
                 action_delay_ms=self._action_delay_ms,
                 max_content_length=self._max_content_length,
                 cdp_url=self._cdp_url,
+                nl_retries=self._nl_retries,
             )
         return self._browser_controller
 
@@ -441,8 +587,82 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         if self._auto_wait_for_stable and cmd in self._STATE_CHANGING_COMMANDS:
             self._auto_settle(ctrl, result)
 
-        self._feed_observation(agent, f"BROWSE_ACTION: {raw}", result)
+        # When the agent explicitly requests page content or a fresh
+        # snapshot, always include the full accessibility tree even if a
+        # page guide is active (opt-in detail).
+        force_full = cmd in ("get_content", "observe")
+        self._feed_observation(
+            agent, f"BROWSE_ACTION: {raw}", result,
+            force_full_content=force_full,
+        )
         return True
+
+    # Bare element types that are too generic to be useful as selectors.
+    # Using these alone (e.g. "click radio") will match the first element
+    # on the page, which is almost never the intended target.
+    _GENERIC_SELECTORS = frozenset({
+        "radio", "button", "input", "textbox", "checkbox", "select",
+        "link", "img", "textarea", "option", "a", "div", "span",
+        "label", "form", "table", "li", "ul", "ol", "p", "h1", "h2",
+        "h3", "h4", "h5", "h6", "section", "article", "header",
+        "footer", "nav", "main",
+    })
+
+    @classmethod
+    def _reject_underspecified_selector(cls, selector: str, cmd: str) -> dict | None:
+        """Return an error dict if *selector* is a bare element type
+        (e.g., ``"radio"``, ``"button"``, ``"role=radio"``).
+        Otherwise return ``None``.
+
+        This catches a common agent mistake: issuing ``click radio``,
+        ``click button``, or ``click role=radio`` instead of a qualified
+        selector like ``role=radio[name="Left is better"]`` or
+        ``text=Submit``.
+        """
+        if not selector:
+            return {
+                "success": False,
+                "error": (
+                    f"'{cmd}' requires a selector but none was provided. "
+                    f"Use BROWSE instead for natural-language element descriptions."
+                ),
+            }
+        stripped = selector.strip().lower()
+
+        # Check bare element type: "radio", "button", etc.
+        if stripped in cls._GENERIC_SELECTORS:
+            return cls._generic_selector_error(selector, cmd)
+
+        # Check bare role selector: "role=radio", "role=button", etc.
+        # These match the first element with that ARIA role — still too
+        # generic.  A proper role selector needs a qualifier like
+        # role=radio[name="Left is better"].
+        if stripped.startswith("role="):
+            role_type = stripped[5:]  # everything after "role="
+            if role_type in cls._GENERIC_SELECTORS and "[" not in stripped:
+                return cls._generic_selector_error(selector, cmd)
+
+        return None
+
+    @staticmethod
+    def _generic_selector_error(selector: str, cmd: str) -> dict:
+        """Build the error dict for an underspecified selector."""
+        # Extract the base type for the hint (strip "role=" prefix if present)
+        base = selector.strip()
+        if base.lower().startswith("role="):
+            base = base[5:]
+        return {
+            "success": False,
+            "error": (
+                f"Selector '{selector}' is too generic — it matches the FIRST "
+                f"'{base}' on the page, which is almost certainly wrong. "
+                f"Use a qualified selector like: "
+                f"role={base}[name=\"...\"], "
+                f"text=<visible label>, "
+                f"{base}:has-text('...'), or "
+                f"use BROWSE with a natural-language description instead."
+            ),
+        }
 
     def _dispatch_low_level(self, ctrl, raw: str) -> dict:
         """
@@ -458,16 +678,25 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         if cmd == "goto":
             return ctrl.goto(arg)
         elif cmd == "click":
+            rejected = self._reject_underspecified_selector(arg, cmd)
+            if rejected:
+                return rejected
             return ctrl.click(arg)
         elif cmd == "fill":
             # format: fill <selector> <text>
             m = re.match(r"(\S+)\s+(.*)", arg)
             if m:
+                rejected = self._reject_underspecified_selector(m.group(1), cmd)
+                if rejected:
+                    return rejected
                 return ctrl.fill(m.group(1), m.group(2))
             return {"success": False, "error": "fill requires <selector> <text>"}
         elif cmd == "select":
             m = re.match(r"(\S+)\s+(.*)", arg)
             if m:
+                rejected = self._reject_underspecified_selector(m.group(1), cmd)
+                if rejected:
+                    return rejected
                 return ctrl.select_option(m.group(1), m.group(2))
             return {"success": False, "error": "select requires <selector> <value>"}
         elif cmd == "press":
@@ -477,7 +706,35 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
             direction = scroll_parts[0] if scroll_parts else "down"
             amount = int(scroll_parts[1]) if len(scroll_parts) > 1 else 300
             return ctrl.scroll(direction, amount)
+        elif cmd == "scroll_element":
+            # format: scroll_element <selector> <up|down> [amount]
+            # The selector may contain spaces (e.g., ".sidebar .list"),
+            # so we parse direction and optional amount from the RIGHT.
+            if not arg.strip():
+                return {"success": False, "error": "scroll_element requires <selector> <up|down> [amount]"}
+            tokens = arg.rsplit(maxsplit=1)
+            # Try to parse the last token as amount
+            se_amount = 300
+            remainder = arg
+            if len(tokens) == 2:
+                try:
+                    se_amount = int(tokens[-1])
+                    remainder = tokens[0]
+                except ValueError:
+                    pass  # last token isn't a number, treat whole arg as selector+direction
+            # Now parse direction from the right of remainder
+            tokens2 = remainder.rsplit(maxsplit=1)
+            if len(tokens2) < 2:
+                return {"success": False, "error": "scroll_element requires <selector> <up|down> [amount]"}
+            se_selector = tokens2[0]
+            se_direction = tokens2[1].lower()
+            if se_direction not in ("up", "down"):
+                return {"success": False, "error": f"scroll_element direction must be 'up' or 'down', got '{se_direction}'"}
+            return ctrl.scroll_element(se_selector, se_direction, se_amount)
         elif cmd == "hover":
+            rejected = self._reject_underspecified_selector(arg, cmd)
+            if rejected:
+                return rejected
             return ctrl.hover(arg)
         elif cmd == "screenshot":
             path = ctrl.screenshot()
@@ -528,7 +785,12 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         ctrl.ensure_launched()
 
         message = action.get("content", "The agent needs your help with the browser.")
-        self._user_interaction.pause_for_action(message)
+        if self._pause_on_user_help:
+            self._user_interaction.pause_for_action(message)
+        else:
+            self._user_interaction.notify(
+                f"[dim](pause_on_user_help is disabled — auto-dismissed)[/dim]\n\n{message}"
+            )
 
         # After the user finishes, capture the new state and feed it back.
         result = {
@@ -623,16 +885,90 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
             logger.debug(f"auto_settle: could not refresh result: {exc}")
 
     # ------------------------------------------------------------------
+    # Content filtering
+    # ------------------------------------------------------------------
+
+    def _apply_content_filter(self, page_content: str) -> str:
+        """
+        Apply an LLM-based content filter to ``page_content`` using the
+        configured ``content_filter_prompt``.
+
+        The filter removes sections of the page that are irrelevant to
+        the agent's current task, replacing them with clear suppression
+        markers.  This can reduce prompt size by 50-90% on complex pages
+        while preserving the information the agent actually needs.
+
+        Returns the filtered content, or the original content if the
+        filter fails.
+        """
+        from rich.console import Console
+        _console = Console()
+
+        original_len = len(page_content)
+        _console.print(
+            f"  :scissors: [bold bright_cyan]Content filter[/] — "
+            f"filtering {original_len:,} chars…"
+        )
+
+        try:
+            filtered = _filter_page_content(
+                page_content, self._content_filter_prompt
+            )
+        except Exception as exc:
+            logger.warning(f"Content filter LLM call failed: {exc}. "
+                           "Using unfiltered content.")
+            _console.print(
+                f"    :warning: [yellow]Filter failed[/] — "
+                f"using full content ({original_len:,} chars)"
+            )
+            return page_content
+
+        if not filtered or not filtered.strip():
+            logger.warning("Content filter returned empty result. "
+                           "Using unfiltered content.")
+            _console.print(
+                f"    :warning: [yellow]Filter returned empty[/] — "
+                f"using full content ({original_len:,} chars)"
+            )
+            return page_content
+
+        filtered_len = len(filtered)
+        reduction_pct = ((original_len - filtered_len) / original_len * 100
+                         if original_len > 0 else 0)
+        _console.print(
+            f"    :white_check_mark: [green]Filtered[/] "
+            f"{original_len:,} → {filtered_len:,} chars "
+            f"([bold green]{reduction_pct:.0f}% reduction[/])"
+        )
+
+        return filtered
+
+    # ------------------------------------------------------------------
     # Observation feedback
     # ------------------------------------------------------------------
 
-    def _feed_observation(self, agent, action_summary: str, result: dict) -> None:
+    def _feed_observation(
+        self,
+        agent,
+        action_summary: str,
+        result: dict,
+        force_full_content: bool = False,
+    ) -> None:
         """
         Feed the browser state back to the agent after an action:
 
         1. Screenshot → ``agent.see(images=..., description=...)``
-        2. Page content + metadata → ``BROWSER_OBSERVATION`` stimulus via
+        2. (Optional) NL page guide → ``BROWSER_PAGE_GUIDE`` stimulus via
+           ``agent._observe()`` — only when ``page_guide_prompt`` is set.
+        3. Page content + metadata → ``BROWSER_OBSERVATION`` stimulus via
            ``agent._observe()``.
+
+        When a ``page_guide_prompt`` is configured the
+        ``BROWSER_OBSERVATION`` stimulus omits the full accessibility
+        tree by default, since the page guide already provides an
+        actionable summary.  The agent can request the full tree at
+        any time via ``BROWSE_ACTION get_content`` or
+        ``BROWSE_ACTION observe`` (which set *force_full_content*).
         """
         ctrl = self._get_browser_controller()
 
@@ -655,11 +991,15 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
                 # multimodal image reference without an LLM vision call —
                 # the main agent LLM sees the raw image alongside the
                 # accessibility-tree text.
-                agent.see(
+                see_result = agent.see(
                     images=[screenshot_path],
                     description=f"Current browser state after: {action_summary}",
                     describe=describe,
                 )
+                # When vision_mode="described", the LLM generates a textual
+                # description that is stored inside the VISUAL stimulus.
+                # We don't extract it here — the page guide LLM call
+                # works from the full page content, which is richer.
             else:
                 # Vision off: skip the screenshot entirely.  The agent
                 # still receives the accessibility-tree page content below.
@@ -688,7 +1028,74 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
         error_info = ""
         if not result.get("success", True):
             error_msg = result.get("error", "unknown error")
-            error_info = f"\n**Action failed:** {error_msg}\n"
+            error_info = (
+                f"\n**⚠️ Action FAILED:** {error_msg}\n"
+                f"The browser action you requested could not be completed "
+                f"even after automatic retries. You should try the action "
+                f"again, possibly with a different approach (e.g. scroll "
+                f"first to reveal elements, use a different description, "
+                f"or use BROWSE_ACTION with an explicit selector).\n"
+            )
+
+        # ----- Optional NL page guide -----
+        # When page_guide_prompt is configured, generate a concise
+        # orientation guide as a separate stimulus.  The guide uses the
+        # FULL (unfiltered) page content for maximum accuracy.
+        guide_active = bool(self._page_guide_prompt)
+        if guide_active and page_content:
+            guide_text = self._apply_page_guide(page_content)
+            if guide_text:
+                agent._observe(
+                    stimulus={
+                        "type": "BROWSER_PAGE_GUIDE",
+                        "content": (
+                            f"**Page guide** after: {action_summary}\n\n"
+                            f"{guide_text}"
+                        ),
+                        "source": "",
+                    }
+                )
+
+        # ----- Optional LLM-based content filter -----
+        # When a content_filter_prompt is configured, an auxiliary LLM
+        # call strips irrelevant sections from the page content before
+        # it reaches the agent.  This can save tens of thousands of
+        # tokens per turn on complex pages.
+        if page_content and self._content_filter_prompt:
+            page_content = self._apply_content_filter(page_content)
+
+        # ----- Decide whether to include full page content -----
+        # When a page_guide_prompt is active the guide already provides
+        # an actionable summary.  Including the full accessibility tree
+        # in every observation would waste context tokens and drown out
+        # the guide.  We omit the tree unless:
+        #   (a) force_full_content is True (get_content / observe), or
+        #   (b) no page_guide_prompt is configured (backward compat).
+        include_tree = force_full_content or not guide_active
+
+        if include_tree:
+            # Truncate the page content for the agent observation.  The
+            # full content (up to max_content_length) is available to
+            # the NL decomposition sub-call, but the agent-level LLM
+            # only needs a summary to decide its next action.
+            _MAX_OBSERVATION_CONTENT = 15_000
+            if page_content and len(page_content) > _MAX_OBSERVATION_CONTENT:
+                obs_page_content = (
+                    page_content[:_MAX_OBSERVATION_CONTENT]
+                    + "\n\n... [content truncated — scroll down to see more elements]"
+                )
+            else:
+                obs_page_content = page_content
+
+            page_section = f"**Page content:**\n```\n{obs_page_content}\n```"
+        else:
+            # Guide-only mode: omit the tree, point agent to get_content.
+            page_section = (
+                "*(Page content omitted — the **Page guide** above "
+                "summarizes the key elements. Use `BROWSE_ACTION get_content` "
+                "or `BROWSE_ACTION observe` to see the full page structure "
+                "if needed.)*"
+            )
 
         observation_text = (
             f"**Browser observation** after: {action_summary}\n"
@@ -698,7 +1105,7 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
             f"**Open tabs ({len(tabs)}):** "
             + ", ".join(f"[{t['index']}] {t['title']}" for t in tabs)
             + "\n\n"
-            f"**Page content:**\n```\n{page_content}\n```"
+            + page_section
         )
 
         agent._observe(
@@ -708,6 +1115,54 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
                 "source": "",
             }
         )
+
+    def _apply_page_guide(
+        self, page_content: str, screenshot_description: str = ""
+    ) -> str:
+        """
+        Generate a concise NL page guide using an auxiliary LLM call.
+
+        The guide gives the agent a quick orientation of the page layout
+        and lists key interactive elements with actionable selectors,
+        based on the configured ``page_guide_prompt``.
+
+        Returns the guide text, or an empty string if generation fails.
+        """
+        from rich.console import Console
+        _console = Console()
+
+        _console.print(
+            "  :compass: [bold bright_cyan]Page guide[/] — "
+            f"generating orientation guide…"
+        )
+
+        try:
+            guide = _generate_page_guide(
+                page_content,
+                self._page_guide_prompt,
+                screenshot_description=screenshot_description,
+            )
+        except Exception as exc:
+            logger.warning(f"Page guide LLM call failed: {exc}. "
+                           "Skipping guide for this turn.")
+            _console.print(
+                f"    :warning: [yellow]Guide generation failed[/] — "
+                f"agent will see page content only"
+            )
+            return ""
+
+        if not guide or not guide.strip():
+            logger.warning("Page guide returned empty result. "
+                           "Skipping guide for this turn.")
+            return ""
+
+        guide_len = len(guide)
+        _console.print(
+            f"    :white_check_mark: [green]Guide ready[/] "
+            f"({guide_len:,} chars)"
+        )
+
+        return guide.strip()
 
     @staticmethod
     def _display_screenshot(path: str) -> None:
@@ -859,8 +1314,11 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
             "viewport_width": self._viewport_width,
             "viewport_height": self._viewport_height,
             "confirm_destructive": self._confirm_destructive,
+            "pause_on_user_help": self._pause_on_user_help,
             "action_delay_ms": self._action_delay_ms,
             "max_content_length": self._max_content_length,
+            "content_filter_prompt": self._content_filter_prompt,
+            "page_guide_prompt": self._page_guide_prompt,
         }
 
     @classmethod
@@ -881,6 +1339,9 @@ class TinyWebBrowserFaculty(TinyMentalFaculty):
             viewport_width=json_dict.get("viewport_width"),
             viewport_height=json_dict.get("viewport_height"),
             confirm_destructive=json_dict.get("confirm_destructive", True),
+            pause_on_user_help=json_dict.get("pause_on_user_help", True),
             action_delay_ms=json_dict.get("action_delay_ms", 0),
             max_content_length=json_dict.get("max_content_length"),
+            content_filter_prompt=json_dict.get("content_filter_prompt"),
+            page_guide_prompt=json_dict.get("page_guide_prompt"),
         )

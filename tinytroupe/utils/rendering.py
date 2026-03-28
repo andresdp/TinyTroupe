@@ -81,6 +81,7 @@ class RichTextStyle:
     STIMULUS_DEFAULT_STYLE = "italic"
     
     ACTION_DONE_STYLE = "grey82"
+    ACTION_TASK_OVER_STYLE = "bold bright_green"
     ACTION_TALK_STYLE = "bold green3"
     ACTION_THINK_STYLE = "green"
     ACTION_DEFAULT_STYLE = "purple"
@@ -100,6 +101,8 @@ class RichTextStyle:
         elif kind == "action":
             if event_type == "DONE":
                 return cls.ACTION_DONE_STYLE
+            elif event_type == "TASK_OVER":
+                return cls.ACTION_TASK_OVER_STYLE
             elif event_type == "TALK":
                 return cls.ACTION_TALK_STYLE
             elif event_type == "THINK":

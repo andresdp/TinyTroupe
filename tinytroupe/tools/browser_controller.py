@@ -95,6 +95,10 @@ class BrowserController:
             actions.  Helps avoid anti-bot detection.  ``0`` by default.
         max_content_length: Maximum character length for page-content
             extraction.  ``None`` means unlimited.
+        nl_retries: Number of retry attempts when an NL-decomposed action
+            fails (e.g. selector timeout).  On each retry the page state
+            is re-captured and the LLM is called again with the failure
+            context appended.  Defaults to ``3``.
     """
 
     # Public methods that perform Playwright operations and must run on
@@ -157,6 +161,7 @@ class BrowserController:
         action_delay_ms: int = 0,
         max_content_length: Optional[int] = None,
         cdp_url: Optional[str] = None,
+        nl_retries: int = 3,
     ):
         self._channel = channel
         self._headless = headless
@@ -169,6 +174,7 @@ class BrowserController:
         self._confirm_destructive = confirm_destructive
         self._action_delay_ms = action_delay_ms
         self._max_content_length = max_content_length
+        self._nl_retries = nl_retries
 
         # User interaction backend
         if user_interaction is None:
@@ -271,6 +277,14 @@ class BrowserController:
             self._context = self._browser.contexts[0]
             self._apply_stealth()
             self._pages = list(self._context.pages) or [self._context.new_page()]
+            # Apply viewport to CDP-connected pages so screenshots
+            # reflect the requested dimensions even when the physical
+            # window is smaller.
+            for p in self._pages:
+                try:
+                    p.set_viewport_size(viewport)
+                except Exception:
+                    pass  # best-effort
             # Make the Playwright-controlled page the visually focused tab
             # so the user sees the same page Playwright is operating on.
             if self._pages:
@@ -441,7 +455,7 @@ class BrowserController:
     def _truncate(self, text: str) -> str:
         """Truncate ``text`` to ``max_content_length`` if configured."""
         if self._max_content_length and len(text) > self._max_content_length:
-            return text[: self._max_content_length] + "\n\n... [content truncated]"
+            return text[: self._max_content_length] + "\n\n... [content truncated — scroll down to see more elements]"
         return text
 
     def _check_destructive(self, description: str) -> bool:
@@ -617,7 +631,7 @@ class BrowserController:
         last_error = ""
         for candidate in candidates:
             try:
-                self._page.click(candidate, timeout=10_000)
+                self._page.click(candidate, timeout=30_000)
                 self._wait_for_stable()
                 self._delay()
                 if candidate != selector:
@@ -746,6 +760,40 @@ class BrowserController:
             return {"success": True}
         except Exception as exc:
             self._log_action("scroll", {"direction": direction, "amount": amount}, False, str(exc))
+            return {"success": False, "error": str(exc)}
+
+    def scroll_element(self, selector: str, direction: str = "down", amount: int = 300) -> dict:
+        """Scroll a specific element (e.g., a sidebar panel) rather than the
+        main page viewport.
+
+        This is essential for scrollable containers like sidebars, panels, or
+        divs with ``overflow: auto/scroll`` that cannot be reached by the
+        global ``mouse.wheel()`` used by :meth:`scroll`.
+
+        Args:
+            selector: CSS selector identifying the scrollable container.
+            direction: ``"up"`` or ``"down"``.
+            amount: Pixels to scroll.
+        """
+        self.ensure_launched()
+        delta = amount if direction == "down" else -amount
+        try:
+            el = self._page.locator(selector).first
+            el.evaluate(f"el => el.scrollTop += {delta}")
+            self._wait_for_stable(timeout=3_000)
+            self._delay()
+            self._log_action(
+                "scroll_element",
+                {"selector": selector, "direction": direction, "amount": amount},
+                True,
+            )
+            return {"success": True}
+        except Exception as exc:
+            self._log_action(
+                "scroll_element",
+                {"selector": selector, "direction": direction, "amount": amount},
+                False, str(exc),
+            )
             return {"success": False, "error": str(exc)}
 
     def wait_for_page_stable(
@@ -1294,6 +1342,11 @@ class BrowserController:
         strategy) is included in the prompt so the LLM knows what elements
         are available on the page.
 
+        If a sub-action fails, the method retries up to ``nl_retries``
+        times.  On each retry the page state is re-captured and the LLM
+        is re-called with the failure context appended, so it can attempt
+        a different selector strategy.
+
         Args:
             command: Natural-language instruction such as "Find the search
                 box and search for 'TinyTroupe'".
@@ -1304,121 +1357,155 @@ class BrowserController:
             ``"page_content"`` (str).
         """
         self.ensure_launched()
-
-        page_content = self.get_page_content()
-        metadata = self.get_page_metadata()
-
-        # Take a screenshot so the sub-LLM can see the page visually.
-        # This helps it identify the correct elements, especially when
-        # the accessibility tree is ambiguous or truncated.
-        screenshot_path = self.screenshot()
-
-        # Build the prompt for the sub-LLM
-        prompt = self._build_nl_decomposition_prompt(command, page_content, metadata)
-
-        # Call the LLM — use multimodal content if we have a screenshot
-        from tinytroupe.clients import client as get_client
-
-        if screenshot_path:
-            from tinytroupe.utils.media import build_multimodal_content_array
-            user_content = build_multimodal_content_array(
-                text=prompt["user"],
-                image_refs=[screenshot_path],
-                detail="auto",
-            )
-        else:
-            user_content = prompt["user"]
-
-        messages = [
-            {"role": "system", "content": prompt["system"]},
-            {"role": "user", "content": user_content},
-        ]
-
-        try:
-            response = get_client().send_message(messages)
-        except Exception as exc:
-            logger.error(f"LLM call for NL command decomposition failed: {exc}")
-            return {"success": False, "error": f"LLM call failed: {exc}"}
-
-        # Parse the response into a list of actions
-        actions = self._parse_nl_response(response)
-        if not actions:
-            return {
-                "success": False,
-                "error": "Could not parse LLM response into executable actions.",
-                "raw_response": response,
-            }
-
-        # Execute each action sequentially
-        results = []
         from rich.console import Console
         _console = Console()
-        _console.print(
-            f"  :globe_with_meridians: [bold bright_cyan]NL decomposition[/] → "
-            f"[bright_cyan]{len(actions)} action(s)[/]"
-        )
-        for idx, a in enumerate(actions):
-            action_name = a.get('action', '?')
-            selector = a.get('selector', a.get('url', a.get('key', '')))
-            text_val = a.get('text', '')
-            detail = f" [dim]{selector}[/]" if selector else ""
-            if text_val:
-                detail += f" [dim italic]'{text_val[:60]}{'…' if len(text_val) > 60 else ''}'[/]"
-            _console.print(
-                f"    [bright_cyan][{idx+1}/{len(actions)}][/] "
-                f"[bold]{action_name}[/]{detail}"
-            )
-        for i, action in enumerate(actions):
-            action_name = action.get('action', '?')
-            _console.print(
-                f"  :arrow_forward: [bold]Executing[/] [{i+1}/{len(actions)}] "
-                f"[bold bright_cyan]{action_name}[/] …"
-            )
-            result = self._execute_parsed_action(action)
-            results.append({"action": action, "result": result})
-            if not result.get("success", False):
-                action_name_lower = action.get("action", "").lower()
-                # wait_for / wait_for_stable failures are non-blocking:
-                # the element might already exist or the page might
-                # already be stable.  Continue with the next action.
-                if action_name_lower in ("wait_for", "wait_for_stable"):
-                    _console.print(
-                        f"    [dim yellow]:hourglass: wait timed out (non-blocking), continuing[/]"
-                    )
-                    continue
-                # All other failures stop the sequence.
-                error_msg = result.get('error', '(no error)')
-                _console.print(
-                    f"    [bold red]:cross_mark: FAILED:[/] [red]{error_msg}[/]"
-                )
-                break
-            else:
-                _console.print(
-                    f"    [green]:white_check_mark: success[/]"
-                )
-            # Brief pause between sub-actions for React microtask flush.
-            # The real waiting happens in _auto_settle after the full
-            # NL command completes.
-            if i < len(actions) - 1:
-                time.sleep(0.5)
 
-        # Final observation
+        max_attempts = max(1, self._nl_retries + 1)  # 1 initial + nl_retries
+        last_error = None
+        results = []
+
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                _console.print(
+                    f"  :counterclockwise_arrows_button: [bold yellow]"
+                    f"Retry {attempt}/{self._nl_retries}[/] — "
+                    f"re-capturing page state and re-decomposing…"
+                )
+                # Brief pause before retry so the page can settle
+                time.sleep(1.0)
+
+            page_content = self.get_page_content()
+            metadata = self.get_page_metadata()
+            screenshot_path = self.screenshot()
+
+            # Build the prompt, including failure context on retries
+            prompt = self._build_nl_decomposition_prompt(
+                command, page_content, metadata,
+                previous_error=last_error if attempt > 0 else None,
+            )
+
+            from tinytroupe.clients import client as get_client
+            if screenshot_path:
+                from tinytroupe.utils.media import build_multimodal_content_array
+                user_content = build_multimodal_content_array(
+                    text=prompt["user"],
+                    image_refs=[screenshot_path],
+                    detail="auto",
+                )
+            else:
+                user_content = prompt["user"]
+
+            messages = [
+                {"role": "system", "content": prompt["system"]},
+                {"role": "user", "content": user_content},
+            ]
+
+            try:
+                response = get_client().send_message(messages)
+            except Exception as exc:
+                logger.error(f"LLM call for NL command decomposition failed: {exc}")
+                last_error = f"LLM call failed: {exc}"
+                continue
+
+            actions = self._parse_nl_response(response)
+            if not actions:
+                last_error = "Could not parse LLM response into executable actions."
+                continue
+
+            # Execute each action sequentially
+            results = []
+            all_succeeded = True
+            _console.print(
+                f"  :globe_with_meridians: [bold bright_cyan]NL decomposition[/] → "
+                f"[bright_cyan]{len(actions)} action(s)[/]"
+            )
+            for idx, a in enumerate(actions):
+                action_name = a.get('action', '?')
+                selector = a.get('selector', a.get('url', a.get('key', '')))
+                text_val = a.get('text', '')
+                detail = f" [dim]{selector}[/]" if selector else ""
+                if text_val:
+                    detail += f" [dim italic]'{text_val[:60]}{'…' if len(text_val) > 60 else ''}'[/]"
+                _console.print(
+                    f"    [bright_cyan][{idx+1}/{len(actions)}][/] "
+                    f"[bold]{action_name}[/]{detail}"
+                )
+            for i, action in enumerate(actions):
+                action_name = action.get('action', '?')
+                _console.print(
+                    f"  :arrow_forward: [bold]Executing[/] [{i+1}/{len(actions)}] "
+                    f"[bold bright_cyan]{action_name}[/] …"
+                )
+                result = self._execute_parsed_action(action)
+                results.append({"action": action, "result": result})
+                if not result.get("success", False):
+                    action_name_lower = action.get("action", "").lower()
+                    if action_name_lower in ("wait_for", "wait_for_stable"):
+                        _console.print(
+                            f"    [dim yellow]:hourglass: wait timed out (non-blocking), continuing[/]"
+                        )
+                        continue
+                    error_msg = result.get('error', '(no error)')
+                    _console.print(
+                        f"    [bold red]:cross_mark: FAILED:[/] [red]{error_msg}[/]"
+                    )
+                    all_succeeded = False
+                    last_error = (
+                        f"Action '{action_name}' with selector "
+                        f"'{action.get('selector', 'N/A')}' failed: {error_msg}"
+                    )
+                    break
+                else:
+                    _console.print(
+                        f"    [green]:white_check_mark: success[/]"
+                    )
+                if i < len(actions) - 1:
+                    time.sleep(1.5)
+
+            if all_succeeded:
+                # All actions succeeded — return success
+                screenshot_path = self.screenshot()
+                final_content = self.get_page_content()
+                final_meta = self.get_page_metadata()
+                self._log_action("execute_nl_command", {"command": command}, True)
+                return {
+                    "success": True,
+                    "actions_executed": results,
+                    "screenshot": screenshot_path,
+                    "page_content": final_content,
+                    "metadata": final_meta,
+                }
+            # else: loop continues to next retry attempt
+
+        # All attempts exhausted
+        _console.print(
+            f"  [bold red]:cross_mark: All {max_attempts} attempt(s) failed for "
+            f"NL command.[/]"
+        )
         screenshot_path = self.screenshot()
         final_content = self.get_page_content()
         final_meta = self.get_page_metadata()
-
-        self._log_action("execute_nl_command", {"command": command}, True)
-
+        self._log_action("execute_nl_command", {"command": command}, False, last_error)
         return {
-            "success": True,
+            "success": False,
+            "error": last_error or "All retry attempts failed.",
             "actions_executed": results,
             "screenshot": screenshot_path,
             "page_content": final_content,
             "metadata": final_meta,
         }
 
-    def _build_nl_decomposition_prompt(self, command: str, page_content: str, metadata: dict) -> dict:
-        """Build the system+user prompt for NL→actions decomposition."""
+    def _build_nl_decomposition_prompt(self, command: str, page_content: str, metadata: dict,
+                                        previous_error: str | None = None) -> dict:
+        """Build the system+user prompt for NL→actions decomposition.
+
+        Args:
+            command: The NL instruction to decompose.
+            page_content: Current page accessibility tree / content.
+            metadata: Page metadata (url, title, etc.).
+            previous_error: If this is a retry, the error from the previous
+                attempt so the LLM can avoid the same mistake.
+        """
         system = (
             "You are a browser automation assistant. Given a natural-language "
             "instruction, a screenshot of the current page, and a structured "
@@ -1454,9 +1541,33 @@ class BrowserController:
             "- Do NOT add `wait_for` actions unless the instruction explicitly asks to wait.\n"
             "- Keep the action list as short as possible.\n"
             "- Do NOT duplicate or retry actions. Produce each action exactly once.\n"
-            "- If the instruction cannot be accomplished with the current page state, "
-            'return `[{"action": "error", "message": "..."}]`.\n'
+            "- The accessibility tree may be TRUNCATED (indicated by '... [content truncated' "
+            "at the end). If the elements you need are not visible in the truncated tree but "
+            "the instruction clearly describes what to interact with, STILL attempt the action "
+            "using `text=` selectors derived from the instruction (e.g., `text=Submit`, "
+            "`text=Left is better`). The browser can find elements in the full page even if "
+            "they are not in the truncated tree.\n"
+            "- Only return an error (`[{\"action\": \"error\", \"message\": \"...\"}]`) if you "
+            "genuinely cannot determine what action to take from the instruction.\n"
+            "- For fill actions, if the exact name in `role=textbox[name=\"...\"]` doesn't "
+            "match, try broader selectors: `role=textbox`, `textarea`, `input[type=text]`, "
+            "or `[placeholder*=\"...\"]`. The accessibility tree name might not match the "
+            "visible label exactly.\n"
         )
+
+        retry_context = ""
+        if previous_error:
+            retry_context = (
+                f"\n## ⚠️ Previous attempt FAILED\n"
+                f"The last attempt to execute this instruction failed with:\n"
+                f"```\n{previous_error}\n```\n"
+                f"The page state above is FRESH (re-captured after the failure). "
+                f"Please try a DIFFERENT selector strategy. For example:\n"
+                f"- If `role=textbox[name=\"...\"]` failed, try `role=textbox` (without name filter) "
+                f"or a CSS selector like `textarea`, `input[type=text]`.\n"
+                f"- If a `text=` selector failed, try `has-text()` or a more specific CSS path.\n"
+                f"- Look carefully at the updated accessibility tree for the actual element names.\n\n"
+            )
 
         user = (
             f"## Current page\n"
@@ -1464,6 +1575,7 @@ class BrowserController:
             f"- Title: {metadata.get('title', 'N/A')}\n\n"
             f"## Page content (accessibility tree / content)\n"
             f"```\n{page_content}\n```\n\n"
+            f"{retry_context}"
             f"## Instruction\n"
             f"{command}\n\n"
             f"Produce the JSON array of actions:"
@@ -1554,6 +1666,7 @@ def launch_edge_with_cdp(
     user_data_dir: Optional[str] = None,
     kill_existing: bool = True,
     timeout: int = 30,
+    window_size: tuple = None,
 ) -> tuple:
     """Launch Microsoft Edge with a remote debugging port for CDP connection.
 
@@ -1582,6 +1695,10 @@ def launch_edge_with_cdp(
         kill_existing: If ``True`` (default), kill all running Edge
             processes and remove singleton lock files before launching.
         timeout: Seconds to wait for the CDP endpoint to become ready.
+        window_size: ``(width, height)`` tuple for the Edge window
+            (e.g., ``(1920, 1080)``).  Larger windows let the agent
+            see more of the page in screenshots.  If ``None``, Edge
+            uses its default window size.
 
     Returns:
         A ``(cdp_url, edge_process)`` tuple where:
@@ -1676,14 +1793,17 @@ def launch_edge_with_cdp(
                     pass
 
     # ── 4. Launch Edge with --remote-debugging-port ──────────────────
-    edge_process = subprocess.Popen([
+    edge_args = [
         edge_exe,
         f"--remote-debugging-port={port}",
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
-        url,
-    ])
+    ]
+    if window_size:
+        edge_args.append(f"--window-size={window_size[0]},{window_size[1]}")
+    edge_args.append(url)
+    edge_process = subprocess.Popen(edge_args)
 
     # ── 5. Wait for CDP endpoint ─────────────────────────────────────
     cdp_url = f"http://localhost:{port}"

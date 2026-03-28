@@ -201,6 +201,14 @@ class TinyPerson(JsonSerializableRegistry):
                     "episodic_memory_fixed_prefix_length"
                 ),
                 lookback_length=config_manager.get("episodic_memory_lookback_length"),
+                enable_decay=config_manager.get("episodic_memory_enable_decay", True),
+                decay_rate=config_manager.get("episodic_memory_decay_rate", 0.5),
+                max_decayed_content_length=config_manager.get(
+                    "episodic_memory_max_decayed_content_length", 10_000
+                ),
+                decay_protection_count=config_manager.get(
+                    "episodic_memory_decay_protection_count", 5
+                ),
             )
 
         if not hasattr(self, "semantic_memory"):
@@ -244,6 +252,9 @@ class TinyPerson(JsonSerializableRegistry):
 
         if not hasattr(self, "_extended_agent_summary"):
             self._extended_agent_summary = None
+
+        if not hasattr(self, "_allow_task_over"):
+            self._allow_task_over = False
 
         if not hasattr(self, "actions_count"):
             self.actions_count = 0
@@ -337,6 +348,9 @@ class TinyPerson(JsonSerializableRegistry):
             actions_constraints_prompt.strip(), "  "
         )
 
+        # TASK_OVER support: when enabled, the agent can signal task completion
+        template_variables["allow_task_over"] = self._allow_task_over
+
         # RAI prompt components, if requested
         template_variables = utils.add_rai_template_variables_if_enabled(
             template_variables
@@ -359,9 +373,25 @@ class TinyPerson(JsonSerializableRegistry):
         """
         Builds a concise text block describing recent episodic events (oldest to newest),
         suitable to be embedded inside the system prompt.
+
+        Content truncation uses the memory system's own limit
+        (``episodic_memory_max_decayed_content_length``, default 10 000 chars)
+        rather than the display limit (``max_content_display_length``).  The
+        decay mechanism already progressively shrinks older memories; using the
+        display limit here would silently discard content from *recent* (decay-
+        protected) memories that the agent needs to act on (e.g. browser
+        observations, page guides).
         """
-        max_len = config_manager.get("max_content_display_length")
-        episodes = self.retrieve_recent_memories(max_content_length=max_len)
+        # Use the memory system's content ceiling for prompt injection, NOT
+        # the display limit.  The display limit (max_content_display_length)
+        # should only affect console/notebook output shown to the human operator.
+        max_len = config_manager.get(
+            "episodic_memory_max_decayed_content_length", 10_000
+        )
+
+        # Retrieve without bulk-truncation — the decay system already
+        # handles older memories.  We truncate per-item below when rendering.
+        episodes = self.retrieve_recent_memories()
         if not episodes:
             return "(No recent episodic memories available)"
 
@@ -690,6 +720,7 @@ class TinyPerson(JsonSerializableRegistry):
                 self.enable_basic_action_repetition_prevention
                 and (TinyPerson.MAX_ACTION_SIMILARITY is not None)
                 and (next_action_similarity > TinyPerson.MAX_ACTION_SIMILARITY)
+                and action.get("type") != "TASK_OVER"  # never suppress TASK_OVER
             ):
                 logger.warning(
                     f"[{self.name}] Action similarity is too high ({next_action_similarity}), replacing it with DONE."
@@ -895,7 +926,15 @@ class TinyPerson(JsonSerializableRegistry):
                     logger.warning(f"[{self.name}] Skipping invalid action: {action}")
                     continue
                 _commit_action(action, role, content)
+                if action.get("type") == "TASK_OVER":
+                    break
                 if action.get("type") == "DONE":
+                    # Peek: if the very next action is TASK_OVER, continue to commit it
+                    idx = actions.index(action)
+                    if (idx + 1 < len(actions)
+                            and isinstance(actions[idx + 1], dict)
+                            and actions[idx + 1].get("type") == "TASK_OVER"):
+                        continue
                     break
 
         # Option 1: run N actions (may span multiple turns if model emits only one)

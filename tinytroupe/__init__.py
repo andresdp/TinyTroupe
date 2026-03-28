@@ -1,6 +1,7 @@
 import configparser
 import logging
 import os
+import pkgutil
 
 # add current path to sys.path
 import sys
@@ -10,6 +11,11 @@ import rich.jupyter
 
 sys.path.append(".")
 from tinytroupe import utils  # now we can import our utils
+
+# Allow extension packages (e.g. tinytroupe-msft) to contribute sub-packages
+# under the tinytroupe namespace.  Without this, Python only searches the
+# directory containing this __init__.py for sub-packages.
+__path__ = pkgutil.extend_path(__path__, __name__)
 
 # AI disclaimers
 print(
@@ -137,6 +143,11 @@ class ConfigManager:
             default=4,
         )
 
+        # Optional RPM (requests per minute) rate limiter.
+        # When set, the client will enforce a minimum interval between API calls.
+        # Use 0 or negative to disable.
+        self._config["rpm"] = config["OpenAI"].getfloat("RPM", 0)
+
         self._config["cache_api_calls"] = config["OpenAI"].getboolean(
             "CACHE_API_CALLS", False
         )
@@ -173,6 +184,18 @@ class ConfigManager:
         self._config["episodic_memory_lookback_length"] = config["Cognition"].getint(
             "EPISODIC_MEMORY_LOOKBACK_LENGTH", 20
         )
+        self._config["episodic_memory_enable_decay"] = config["Cognition"].getboolean(
+            "EPISODIC_MEMORY_ENABLE_DECAY", True
+        )
+        self._config["episodic_memory_decay_rate"] = config["Cognition"].getfloat(
+            "EPISODIC_MEMORY_DECAY_RATE", 0.5
+        )
+        self._config["episodic_memory_max_decayed_content_length"] = config[
+            "Cognition"
+        ].getint("EPISODIC_MEMORY_MAX_DECAYED_CONTENT_LENGTH", 10000)
+        self._config["episodic_memory_decay_protection_count"] = config[
+            "Cognition"
+        ].getint("EPISODIC_MEMORY_DECAY_PROTECTION_COUNT", 5)
 
         self._config["action_generator_max_attempts"] = config[
             "ActionGenerator"

@@ -99,3 +99,120 @@ def test_decode_complete_state(setup, focus_group_world):
     assert len(world_2.agents) == n_agents_1, "The world should have the same number of agents."
 
 
+@pytest.mark.core
+def test_task_over_early_stop(setup):
+    """
+    Test that TASK_OVER causes TinyWorld to skip remaining simulation steps.
+
+    Scenario:
+      - Create a world with ``allow_early_stop_via_task_over=True``
+      - Give an agent a simple, completable task
+      - Run with enough steps that the agent should finish and issue TASK_OVER
+      - Verify that: (a) the agent issued TASK_OVER, (b) the world stopped early
+
+    Multi-task lifecycle:
+      - After the first run, broadcast a NEW task and run again
+      - Verify the agent participates normally in the second run (TASK_OVER resets)
+    """
+    oscar = create_oscar_the_architect()
+
+    world = TinyWorld(
+        "Task Over Test",
+        [oscar],
+        allow_early_stop_via_task_over=True,
+    )
+
+    # --- First task ---
+    world.broadcast(
+        "Think briefly about what your favorite building is and why, "
+        "then tell me about it. This is a SIMPLE task. Once you have "
+        "answered, the task is fully complete and you should signal that."
+    )
+
+    # Give enough steps for the agent to finish
+    actions_over_time = world.run(5, return_actions=True, parallelize=False)
+
+    # The world should have stopped early (agent should finish in 1-2 steps)
+    assert len(actions_over_time) < 5, (
+        f"Expected early stop via TASK_OVER, but the world ran all 5 steps "
+        f"({len(actions_over_time)} steps executed)."
+    )
+
+    # Check that TASK_OVER was issued
+    assert oscar.name in world._task_over_agents, (
+        "Oscar should be in _task_over_agents after issuing TASK_OVER."
+    )
+
+    # Check that the agent actually produced a TASK_OVER action in its memory
+    task_over_found = False
+    for msg in oscar.episodic_memory.retrieve_all():
+        if (msg.get("role") == "assistant"
+                and "action" in msg.get("content", {})
+                and msg["content"]["action"].get("type") == "TASK_OVER"):
+            task_over_found = True
+            break
+    assert task_over_found, "Oscar should have a TASK_OVER action in episodic memory."
+
+    # --- Second task (multi-task lifecycle) ---
+    world.broadcast(
+        "Now think about what your least favorite building is and why, "
+        "then tell me about it. Once you have answered, the task is fully "
+        "complete and you should signal that."
+    )
+
+    actions_over_time_2 = world.run(5, return_actions=True, parallelize=False)
+
+    # The agent should have participated (TASK_OVER resets per run)
+    assert len(actions_over_time_2) >= 1, (
+        "Oscar should participate in the second run after TASK_OVER reset."
+    )
+
+    # And should have issued TASK_OVER again
+    assert oscar.name in world._task_over_agents, (
+        "Oscar should be in _task_over_agents again after the second task."
+    )
+
+
+@pytest.mark.core
+def test_task_over_disabled_by_default(setup):
+    """
+    When ``allow_early_stop_via_task_over`` is False (default), agents should
+    NOT see TASK_OVER in their prompt and the world never stops early.
+    """
+    oscar = create_oscar_the_architect()
+    world = TinyWorld("No Task Over", [oscar])
+
+    # The agent should NOT have _allow_task_over set
+    assert not oscar._allow_task_over, (
+        "Agent should have _allow_task_over=False when world does not enable it."
+    )
+
+    # The flag should be False on the world
+    assert not world._allow_early_stop_via_task_over
+
+    # TASK_OVER should NOT appear in the agent's system prompt
+    prompt = oscar.generate_agent_system_prompt()
+    assert "TASK_OVER" not in prompt, (
+        "TASK_OVER should not appear in agent prompt when disabled."
+    )
+
+
+@pytest.mark.core
+def test_task_over_in_prompt_when_enabled(setup):
+    """
+    When ``allow_early_stop_via_task_over`` is True, TASK_OVER should appear
+    in the agent's system prompt.
+    """
+    oscar = create_oscar_the_architect()
+    world = TinyWorld("With Task Over", [oscar], allow_early_stop_via_task_over=True)
+
+    assert oscar._allow_task_over, (
+        "Agent should have _allow_task_over=True when world enables it."
+    )
+
+    prompt = oscar.generate_agent_system_prompt()
+    assert "TASK_OVER" in prompt, (
+        "TASK_OVER should appear in agent prompt when enabled."
+    )
+
+

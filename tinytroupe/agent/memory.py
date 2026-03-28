@@ -237,8 +237,17 @@ class EpisodicMemory(TinyMemory):
         "simulation_timestamp": None,
     }
 
+    # Marker appended to content that has been decayed.
+    _DECAY_MARKER = "\n\n... [memory decayed \u2014 detail lost over time]"
+
     def __init__(
-        self, fixed_prefix_length: int = 20, lookback_length: int = 100
+        self,
+        fixed_prefix_length: int = 20,
+        lookback_length: int = 100,
+        enable_decay: bool = True,
+        decay_rate: float = 0.5,
+        max_decayed_content_length: int = 10_000,
+        decay_protection_count: int = 5,
     ) -> None:
         """
         Initializes the memory.
@@ -246,9 +255,28 @@ class EpisodicMemory(TinyMemory):
         Args:
             fixed_prefix_length (int): The fixed prefix length. Defaults to 20.
             lookback_length (int): The lookback length. Defaults to 100.
+            enable_decay (bool): Whether to gradually shrink older buffer
+                items on each store, analogous to Ebbinghaus memory decay.
+                Defaults to True.
+            decay_rate (float): Multiplicative factor applied to content
+                length on each decay round.  E.g. 0.5 halves the allowed
+                size per round.  Must be in (0, 1).  Defaults to 0.5.
+            max_decayed_content_length (int): Floor below which content
+                is never further decayed (in characters).  Defaults to
+                10 000.
+            decay_protection_count (int): Number of most recent buffer
+                items that are shielded from decay.  This ensures that
+                the agent's most recent experiences remain at full
+                fidelity for ongoing tasks, analogous to the
+                psychological recency effect.  Must be >= 1 (the newest
+                item is always protected).  Defaults to 5.
         """
         self.fixed_prefix_length = fixed_prefix_length
         self.lookback_length = lookback_length
+        self.enable_decay = enable_decay
+        self.decay_rate = decay_rate
+        self.max_decayed_content_length = max_decayed_content_length
+        self.decay_protection_count = max(decay_protection_count, 1)
 
         # the definitive memory that records all episodic events
         self.memory = []
@@ -259,7 +287,12 @@ class EpisodicMemory(TinyMemory):
     def commit_episode(self):
         """
         Ends the current episode, storing the episodic buffer in memory.
+        If decay is enabled, enforces the content ceiling on every item
+        before committing to permanent storage.
         """
+        if self.enable_decay:
+            for item in self.episodic_buffer:
+                self._enforce_ceiling(item)
         self.memory.extend(self.episodic_buffer)
         self.episodic_buffer = []
 
@@ -324,9 +357,98 @@ class EpisodicMemory(TinyMemory):
     ######################################
     def _store(self, value: Any) -> None:
         """
-        Stores a value in memory.
+        Stores a value in the episodic buffer.  If decay is enabled,
+        applies one round of memory decay to buffer items outside the
+        recent protection window (``decay_protection_count``).
         """
         self.episodic_buffer.append(value)
+
+        if self.enable_decay and len(self.episodic_buffer) > 1:
+            self._apply_decay_to_buffer()
+
+    # ------------------------------------------------------------------
+    # Memory decay
+    # ------------------------------------------------------------------
+
+    def _apply_decay_to_buffer(self) -> None:
+        """Apply one round of multiplicative decay to every buffer item
+        except the most recent ``decay_protection_count`` items.  This
+        mirrors the psychological recency effect: recent experiences are
+        kept at full fidelity while older ones gradually fade."""
+        protected = self.decay_protection_count
+        if len(self.episodic_buffer) <= protected:
+            return
+        for item in self.episodic_buffer[:-protected]:
+            self._decay_item(item)
+
+    def _decay_item(self, item: dict) -> None:
+        """Shrink oversized text fields in *item* by ``decay_rate``,
+        but never below ``max_decayed_content_length``."""
+        content = item.get("content") if isinstance(item, dict) else None
+        if content is None:
+            return
+
+        floor = self.max_decayed_content_length
+
+        if isinstance(content, str):
+            text = self._strip_decay_marker(content)
+            if len(text) > floor:
+                new_limit = max(floor, int(len(text) * self.decay_rate))
+                item["content"] = text[:new_limit] + self._DECAY_MARKER
+            return
+
+        if isinstance(content, dict):
+            # Stimulus path: content["stimuli"][*]["content"]
+            for stimulus in content.get("stimuli", []):
+                if isinstance(stimulus, dict) and isinstance(stimulus.get("content"), str):
+                    text = self._strip_decay_marker(stimulus["content"])
+                    if len(text) > floor:
+                        new_limit = max(floor, int(len(text) * self.decay_rate))
+                        stimulus["content"] = text[:new_limit] + self._DECAY_MARKER
+
+            # Action path: content["action"]["content"]
+            action = content.get("action")
+            if isinstance(action, dict) and isinstance(action.get("content"), str):
+                text = self._strip_decay_marker(action["content"])
+                if len(text) > floor:
+                    new_limit = max(floor, int(len(text) * self.decay_rate))
+                    action["content"] = text[:new_limit] + self._DECAY_MARKER
+
+    def _enforce_ceiling(self, item: dict) -> None:
+        """Hard-truncate all text fields in *item* to
+        ``max_decayed_content_length``.  Called before committing
+        the episode to permanent memory."""
+        content = item.get("content") if isinstance(item, dict) else None
+        if content is None:
+            return
+
+        ceiling = self.max_decayed_content_length
+
+        if isinstance(content, str):
+            text = self._strip_decay_marker(content)
+            if len(text) > ceiling:
+                item["content"] = text[:ceiling] + self._DECAY_MARKER
+            return
+
+        if isinstance(content, dict):
+            for stimulus in content.get("stimuli", []):
+                if isinstance(stimulus, dict) and isinstance(stimulus.get("content"), str):
+                    text = self._strip_decay_marker(stimulus["content"])
+                    if len(text) > ceiling:
+                        stimulus["content"] = text[:ceiling] + self._DECAY_MARKER
+
+            action = content.get("action")
+            if isinstance(action, dict) and isinstance(action.get("content"), str):
+                text = self._strip_decay_marker(action["content"])
+                if len(text) > ceiling:
+                    action["content"] = text[:ceiling] + self._DECAY_MARKER
+
+    def _strip_decay_marker(self, text: str) -> str:
+        """Remove the decay marker suffix if present, so length
+        measurement and re-truncation are accurate."""
+        if text.endswith(self._DECAY_MARKER):
+            return text[: -len(self._DECAY_MARKER)]
+        return text
 
     def retrieve(
         self,
