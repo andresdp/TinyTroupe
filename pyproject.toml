@@ -3,8 +3,10 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["tinytroupe"]
 include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["tinytroupe*"]
 
 [project]
 name = "tinytroupe"
@@ -22,9 +24,9 @@ classifiers = [
 ]
 
 dependencies = [
-    "pandas", 
+    "pandas",
     "pytest", "pytest-cov", "pytest-timeout", "pytest-html",
-    "openai >= 1.65", 
+    "openai >= 1.65",
     "httpx",
     "tiktoken",
     "msal",
@@ -38,6 +40,13 @@ dependencies = [
     "textdistance",
     "scipy"
 ]
+
+[project.optional-dependencies]
+# Optional extras kept for compatibility. Core ATAM usage does not require them.
+tools = ["pypandoc", "python-docx", "markdown"]
+profiling = ["matplotlib", "seaborn", "scipy"]
+ui = ["jupyter"]
+all = ["tinytroupe[tools,profiling,ui]"]
 
 [project.urls]
 "Homepage" = "https://github.com/microsoft/tinytroupe"

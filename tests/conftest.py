@@ -1,9 +1,15 @@
+import os
 import threading
 import time
 
 import pytest
+from dotenv import load_dotenv
 
 from tinytroupe.utils.concurrency import monitor_threads
+
+# Load environment variables from .env at the project root so that
+# API keys (e.g. OPENAI_API_KEY) are available to all tests.
+load_dotenv()
 
 ##########################
 # Global testing options
