@@ -55,7 +55,7 @@ This rule set captures the key architectural conventions of the TinyTroupe proje
 ## Quality control and validation
 - `ActionGenerator` optionally runs proposition-based quality checks (persona adherence, self-consistency, fluency, suitability, similarity) scored 0–9 by the LLM.
 - `QUALITY_THRESHOLD` determines pass/fail; failures trigger regeneration or direct correction.
-- Propositions are defined in `validation/propositions.py` and can be reused for post-hoc validation via `TinyPersonValidator`.
+- The `Proposition` **class** is defined in `experimentation/proposition.py` (with `MIN_SCORE = 0`, `MAX_SCORE = 9`); reusable predefined proposition **instances** (e.g., `persona_adherence`, `self_consistency`) live in `validation/propositions.py`. Both can be used for post-hoc validation via `TinyPersonValidator`.
 
 ## Profiling and extraction
 - `Profiler` analyzes agent populations with demographics, persona composition facets (with LLM-driven normalization via `Normalizer`), correlations, and visualizations.
