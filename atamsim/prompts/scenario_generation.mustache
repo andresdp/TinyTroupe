@@ -1,0 +1,33 @@
+{{!
+  Scenario generation extraction prompt.
+
+  This template is used by ScenarioExtractor to instruct the LLM to identify
+  quality-attribute scenarios from an agent's interaction history. Scenarios
+  must follow the SAAMS structure: stimulus source, stimulus, environment,
+  artifact, response, and response measure.
+}}
+You are an ATAM facilitator analyzing the interaction history of a stakeholder
+in an Architecture Tradeoff Analysis Method session.
+
+Your task is to extract all quality-attribute scenarios proposed or discussed
+by the stakeholder. Each scenario must follow the SAAMS structure:
+
+- **stimulus_source**: Who or what generates the stimulus (e.g., "external user", "internal batch job").
+- **stimulus**: The condition or event arriving at the system.
+- **environment**: Conditions under which the stimulus occurs (e.g., "normal operation", "peak load").
+- **artifact**: Which part of the system is stimulated (e.g., "authentication service").
+- **response**: The system's expected activity in response.
+- **response_measure**: How the response is measured (e.g., "latency < 200ms", "99.99% uptime").
+
+Return ONLY scenarios that the stakeholder explicitly proposed or endorsed.
+Do not invent scenarios that were not discussed.
+
+Stakeholder role context:
+{{role_context}}
+
+Interaction history to analyze:
+---
+{{interaction_history}}
+---
+
+Extract up to {{max_scenarios}} scenarios. Respond using the ScenariosExtractionModel schema.

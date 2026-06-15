@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atamsim"
+version = "0.1.0"
+description = "ATAM (Architecture Tradeoff Analysis Method) multi-agent simulation extension for TinyTroupe"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "TinyTroupe ATAM Fork Contributors" },
+]
+keywords = ["atam", "architecture-analysis", "multi-agent", "simulation", "tinytroupe"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "tinytroupe",
+    "pydantic>=2.0",
+    "chevron",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[project.urls]
+Repository = "https://github.com/andresdp/TinyTroupe"
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["atamsim", "atamsim.*"]
+
+[tool.setuptools.package-data]
+atamsim = ["prompts/*.mustache", "config.ini", "data/**/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

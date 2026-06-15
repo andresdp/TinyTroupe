@@ -21,6 +21,7 @@
 | **Long-form narrative generation** | `Story telling (long narratives)` |
 | **Multimodal (vision) tasks** | `Vision for Product, Diagnosis and Appreciation Feedback` |
 | **Controlled experimentation** | `publications/paper_artifacts_*` |
+| **Software architecture evaluation** | `atamsim` package (ATAM simulations) |
 
 ### Design philosophy
 
@@ -29,6 +30,10 @@
 3. **Reproducibility by construction** — the transactional caching system makes simulations deterministic and replayable.
 4. **Extensibility** — every major subsystem (LLM client, memory, tools, environments, faculties) is pluggable.
 5. **Safety-aware** — real-world side effects, content filters, and ownership checks are first-class concerns.
+
+### Domain-specific extensions
+
+Beyond the general-purpose framework, TinyTroupe supports **domain-specific extension packages**. The `atamsim` package (see §11) implements the Architecture Tradeoff Analysis Method (ATAM) for software architecture evaluation, demonstrating how the core abstractions — `TinyPerson`, `TinyWorld`, `TinyPersonFactory` — can be composed into a structured, multi-phase simulation workflow.
 
 ---
 
@@ -680,6 +685,79 @@ Key `config.ini` parameters:
 - **Scenario tests:** `tests/scenarios/` — end-to-end simulation scenarios.
 - **Cache-based testing:** `test_with_cache.bat` — run tests using cached LLM responses for speed.
 - **Empirical validation:** `data/empirical/` and `publications/` contain real-world comparison data and paper artifacts.
+
+---
+
+## 11. Extension Packages — `atamsim`
+
+### Purpose
+
+`atamsim` is a domain-specific extension package that implements the **Architecture Tradeoff Analysis Method (ATAM)** on top of the TinyTroupe framework. It demonstrates how TinyTroupe's core abstractions can be composed to create specialized, structured simulation workflows.
+
+### ATAM → TinyTroupe mapping
+
+| ATAM Concept | TinyTroupe Abstraction | atamsim Implementation |
+|--------------|------------------------|------------------------|
+| Stakeholder (Architect, QA Lead, Product Owner, …) | `TinyPerson` | Stakeholder generated from role templates via `ATAMStakeholderFactory` |
+| Evaluation session | `TinyWorld` | `ATAMSession` orchestrates the multi-phase workflow |
+| Stakeholder panel generation | `TinyPersonFactory` | `ATAMStakeholderFactory` extends with role-specific templates |
+| Phase output extraction | `ResultsExtractor` | Specialized extractors (`ScenarioExtractor`, `ConcernExtractor`, `VoteExtractor`) |
+| Final report | — | `ReportGenerator` aggregates phase outputs into an `ATAMReport` |
+
+### Seven-phase workflow
+
+```
+1. Presentation           ── Architect presents the architecture to stakeholders
+2. Approach Identification── Identify architectural approaches / patterns
+3. Scenario Generation    ── Stakeholders generate use-case scenarios
+4. Scenario Prioritization── Stakeholders vote on scenario importance
+5. Approach Analysis      ── Analyze approaches against prioritized scenarios
+6. Concern Identification ── Identify sensitivity points, tradeoffs, risks
+7. Brainstorming          ── Generate mitigation strategies for concerns
+```
+
+Each phase is a plain Python orchestration object (`ATAMPhase` subclass) that drives stakeholder agents through the simulation, captures outputs, and feeds them into the next phase.
+
+### Package structure
+
+```
+atamsim/
+├── models.py               # Domain models (QualityAttribute, Scenario, Concern, …)
+├── config.py               # atamsim-specific configuration loader
+├── config.ini              # Separate config section for atamsim
+├── session/atam_session.py # ATAMSession (TinyWorld subclass)
+├── stakeholders/
+│   ├── templates.py        # 10 predefined stakeholder role templates
+│   └── stakeholder_factory.py  # ATAMStakeholderFactory
+├── phases/                 # 7 phase implementations
+│   ├── base_phase.py
+│   ├── presentation_phase.py
+│   └── …
+├── extraction/             # Structured output extractors
+│   ├── scenario_extractor.py
+│   ├── concern_extractor.py
+│   └── report_generator.py
+├── prompts/                # Mustache templates for LLM prompts
+├── data/                   # Sample architecture documents
+└── tests/                  # Unit tests for domain models
+```
+
+### Key design decisions
+
+1. **Separate package, not a fork** — `atamsim` lives alongside `tinytroupe/` and imports from it, rather than modifying core abstractions.
+2. **Phase orchestration over subclassing** — Phases are plain Python objects that drive agents, not simulation entities. This keeps the simulation loop simple and the workflow logic explicit.
+3. **Extraction by composition** — Extractors wrap `ResultsExtractor` rather than subclassing it, preserving the base API while adding domain-specific parsing.
+4. **Pydantic for structured output** — Each extractor defines a Pydantic model (e.g., `ScenariosExtractionModel`) passed as `response_format` to the LLM client, ensuring JSON schema compliance.
+5. **Template-driven stakeholders** — The 10 role templates (`templates.py`) provide rich persona seeds (Architect, Product Owner, QA Lead, Security Specialist, …) that the factory expands into full `TinyPerson` instances.
+6. **Separate configuration** — `atamsim/config.ini` is layered on top of the base `config.ini`, keeping domain parameters isolated.
+
+### Supported quality attributes
+
+`QualityAttribute` enum covers 11 values: **Availability**, **Modifiability**, **Performance**, **Security**, **Testability**, **Usability**, **Scalability**, **Reliability**, **Deployability**, **Cost**.
+
+### Concern taxonomy
+
+Concerns are classified into four types — **SensitivityPoint**, **Tradeoff**, **Risk**, **NonRisk** — matching the standard ATAM output structure.
 
 ---
 

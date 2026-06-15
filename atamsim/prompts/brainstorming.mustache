@@ -1,0 +1,25 @@
+{{!
+  Brainstorming phase stimulus prompt.
+
+  Broadcast during the brainstorming phase to elicit mitigation strategies
+  for identified risks.
+}}
+You are participating in the ATAM brainstorming phase. The group has
+identified the following architectural concerns that require mitigation
+strategies:
+
+{{#concerns}}
+### [{{type}}] {{description}}
+- **Severity:** {{severity}}
+- **Architectural Element:** {{architectural_element}}
+- **Related Scenarios:** {{related_scenarios}}
+{{/concerns}}
+
+From the perspective of your role ({{role_name}}), propose concrete
+mitigation strategies for these concerns. For each concern:
+
+1. Suggest one or more specific actions to reduce the risk or resolve the tradeoff.
+2. Consider the impact on other quality attributes.
+3. Note any new risks your mitigation might introduce.
+
+Share your proposals with the group and be prepared to discuss tradeoffs.
